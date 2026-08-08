@@ -24,7 +24,44 @@ Thumbs.db
 node_modules/
 npm-debug.log
 yarn-error.log
+
+# ===================================================
+# Python FastAPI Backend
+# ===================================================
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+
+# Virtual Environments
+venv/
+env/
+.env_venv/
+.venv/
+env.bak/
+venv.bak/
+
+# Environment variables and secrets (CRITICAL for backend)
 .env
+.env.*
+*.env
+
+# Local Databases
+*.sqlite3
+*.db
+
+# Testing, Coverage, and Type Checking
+.pytest_cache/
+.mypy_cache/
+.coverage
+htmlcov/
+.tox/
+coverage.xml
+
+# Logs
+logs/
+*.log
 
 # ===================================================
 # Flutter App
