@@ -1,0 +1,33 @@
+{
+  "manifest_version": 3,
+  "name": "Theft Alert | Team Paradox",
+  "version": "1.0.0",
+  "description": "This is a chromium extension developed by Team Paradox to prevent and alert the users if they visit Phishing or fraud sites.",
+  "icons": {
+    "16": "resources/icon16.png",
+    "48": "resources/icon48.png",
+    "128": "resources/icon128.png"
+  },
+  "action": {
+    "default_title": "Open Extension",
+    "default_popup": "frontend/popup.html"
+  },
+  "background": {
+    "service_worker": "Scripts/service_worker.js"
+  },
+  "content_scripts": [
+    {
+      "matches": ["<all_urls>"],
+      "js": [
+        "Scripts/universal_script.js"
+      ],
+      "css": [
+        "Styles/universal_style.css"
+      ],
+      "run_at": "document_start",
+      "world": "MAIN"
+    }
+  ],
+  "permissions": ["scripting", "notifications", "storage", "tabs"],
+  "host_permissions": ["<all_urls>"]
+}

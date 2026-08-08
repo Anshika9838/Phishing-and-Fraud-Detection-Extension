@@ -1,0 +1,76 @@
+# ===================================================
+# OS & Editor/IDE Files (Applies to the whole repo)
+# ===================================================
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
+*.sw?
+*.iml
+
+# ===================================================
+# Chromium Extension
+# ===================================================
+# Ignore packaged extension files (for when you publish)
+*.crx
+*.pem
+*.zip
+
+# Ignore Node.js modules and logs (in case you add a bundler like Webpack/Vite later)
+node_modules/
+npm-debug.log
+yarn-error.log
+.env
+
+# ===================================================
+# Flutter App
+# ===================================================
+# Flutter/Dart/Pub related
+**/doc/api/
+**/ios/Flutter/.last_build_id
+.dart_tool/
+.flutter-plugins
+.flutter-plugins-dependencies
+.packages
+.pub-cache/
+.pub/
+build/
+
+# Android related
+**/android/**/gradle-wrapper.jar
+**/android/.gradle/
+**/android/captures/
+**/android/local.properties
+**/android/**/GeneratedPluginRegistrant.java
+**/android/key.properties
+**/android/app/release/
+**/android/app/debug/
+
+# iOS related
+**/ios/Pods/
+**/ios/.symlinks/
+**/ios/Flutter/Flutter.framework
+**/ios/Flutter/Flutter.podspec
+**/ios/Flutter/Generated.xcconfig
+**/ios/Flutter/app.flx
+**/ios/Flutter/app.zip
+**/ios/Flutter/flutter_assets/
+**/ios/Flutter/flutter_export_environment.sh
+**/ios/ServiceDefinitions.json
+**/ios/Runner/GeneratedPluginRegistrant.*
+
+# macOS related
+**/macos/Flutter/GeneratedPluginRegistrant.swift
+**/macos/Flutter/ephemeral/
+**/macos/Pods/
+
+# Web related
+**/lib/generated_plugin_registrant.dart
+
+# Symbolication & Obfuscation related
+app.*.symbols
+app.*.map.json

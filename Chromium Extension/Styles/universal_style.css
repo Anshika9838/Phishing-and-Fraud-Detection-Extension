@@ -1,0 +1,193 @@
+@media print {
+    div.model-dialog.model-dialog-centered {
+        margin: 0;
+        padding: 4px;
+        & i, button {
+            display: none;
+        }
+    }
+}
+
+.receipt-failure-hub {
+    position: fixed;
+    right: 18px;
+    bottom: 18px;
+    z-index: 2147483647;
+    font-family: Inter, Arial, sans-serif;
+    color: #142033;
+    pointer-events: none;
+}
+
+.receipt-failure-hub__button {
+    pointer-events: auto;
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+    border: 1px solid rgba(64, 93, 127, 0.22);
+    background: rgba(255, 255, 255, 0.9);
+    color: #142033;
+    border-radius: 999px;
+    padding: 10px 14px;
+    box-shadow: 0 16px 36px rgba(11, 18, 31, 0.14);
+    cursor: pointer;
+    backdrop-filter: blur(10px);
+}
+
+.receipt-failure-hub__button-label {
+    font-size: 12px;
+    font-weight: 700;
+    letter-spacing: 0.01em;
+}
+
+.receipt-failure-hub__button-icon {
+    font-size: 13px;
+    opacity: 0.8;
+}
+
+.receipt-failure-hub__badge {
+    min-width: 20px;
+    height: 20px;
+    border-radius: 999px;
+    background: #e04040;
+    color: #fff;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 12px;
+    font-weight: 700;
+    padding: 0 6px;
+}
+
+.receipt-failure-hub__panel {
+    pointer-events: auto;
+    width: min(360px, calc(100vw - 24px));
+    margin-top: 10px;
+    border: 1px solid rgba(64, 93, 127, 0.18);
+    border-radius: 18px;
+    background: rgba(255, 255, 255, 0.96);
+    box-shadow: 0 24px 60px rgba(11, 18, 31, 0.18);
+    overflow: hidden;
+    transform-origin: bottom right;
+}
+
+.receipt-failure-hub__panel[hidden] {
+    display: none;
+}
+
+.receipt-failure-hub__panel-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: flex-start;
+    gap: 10px;
+    padding: 12px 14px;
+    border-bottom: 1px solid rgba(64, 93, 127, 0.12);
+}
+
+.receipt-failure-hub__panel-copy {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+}
+
+.receipt-failure-hub__panel-title {
+    font-size: 13px;
+    font-weight: 700;
+}
+
+.receipt-failure-hub__panel-note {
+    font-size: 12px;
+    color: #61708a;
+}
+
+.receipt-failure-hub__tabs {
+    display: flex;
+    gap: 8px;
+    padding: 10px 14px 0;
+}
+
+.receipt-failure-hub__tab {
+    border: 1px solid rgba(64, 93, 127, 0.18);
+    background: rgba(247, 249, 252, 0.96);
+    color: #142033;
+    border-radius: 999px;
+    padding: 6px 12px;
+    font-size: 12px;
+    font-weight: 700;
+    cursor: pointer;
+}
+
+.receipt-failure-hub__tab[aria-pressed="true"] {
+    background: #142033;
+    color: #fff;
+    border-color: #142033;
+}
+
+.receipt-failure-hub__view {
+    padding-top: 10px;
+}
+
+.receipt-failure-hub__view[hidden] {
+    display: none;
+}
+
+.receipt-failure-hub__list {
+    max-height: 320px;
+    overflow: auto;
+    padding: 10px;
+    display: grid;
+    gap: 10px;
+}
+
+.receipt-failure-hub__item {
+    border: 1px solid rgba(64, 93, 127, 0.14);
+    border-radius: 14px;
+    padding: 10px;
+    background: rgba(247, 249, 252, 0.96);
+    display: grid;
+    gap: 8px;
+}
+
+.receipt-failure-hub__item-title {
+    font-size: 13px;
+    font-weight: 700;
+    white-space: normal;
+    overflow-wrap: anywhere;
+}
+
+.receipt-failure-hub__item-meta {
+    font-size: 12px;
+    color: #61708a;
+    white-space: normal;
+    line-height: 1.4;
+}
+
+.receipt-failure-hub__item-actions {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+}
+
+.receipt-failure-hub__item-actions button {
+    border: 1px solid rgba(64, 93, 127, 0.18);
+    background: #fff;
+    color: #142033;
+    border-radius: 999px;
+    padding: 5px 10px;
+    font-size: 12px;
+    cursor: pointer;
+}
+
+.receipt-failure-hub__details {
+    display: none;
+    white-space: normal;
+    font-size: 12px;
+    line-height: 1.45;
+    color: #1f2c40;
+    border-top: 1px solid rgba(64, 93, 127, 0.12);
+    padding-top: 8px;
+}
+
+.receipt-failure-hub__item.is-open .receipt-failure-hub__details {
+    display: block;
+}
+
