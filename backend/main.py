@@ -1,7 +1,9 @@
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from typing import List
+import logging
 import uvicorn
+import json
 
 # Initialize the FastAPI app
 app = FastAPI(
@@ -10,6 +12,23 @@ app = FastAPI(
     version="1.0.0"
 )
 
+# ===================================================
+# Logging Configuration
+# ===================================================
+# Create a logger for saving scan reports to a file.
+# This will create a 'scan_reports.log' file in your backend directory.
+report_logger = logging.getLogger("scan_reports")
+report_logger.setLevel(logging.INFO)
+
+# Create a file handler
+file_handler = logging.FileHandler("scan_reports.log")
+file_handler.setLevel(logging.INFO)
+
+# Create a formatter and add it to the handler
+formatter = logging.Formatter('%(asctime)s - %(message)s')
+file_handler.setFormatter(formatter)
+
+report_logger.addHandler(file_handler)
 # ===================================================
 # CORS Configuration
 # ===================================================
@@ -63,8 +82,18 @@ async def root():
 
 @app.post("/api/report")
 async def report_url(url_data: dict):
-    # Example endpoint to handle traditional HTTP POST requests
-    return {"message": "URL received for scanning", "data": url_data}
+    """
+    Receives website data from the extension, logs it to a file for analysis,
+    and broadcasts a summary to all connected WebSocket clients.
+    """
+    domain = url_data.get("domain", "unknown domain")
+
+    # Log the full data payload to scan_reports.log for later analysis
+    # Using json.dumps for pretty, readable logging
+    report_logger.info(json.dumps(url_data, indent=2))
+
+    await manager.broadcast(f"Scanning report received for: {domain}")
+    return {"message": "URL data received and logged for analysis", "domain": domain}
 
 # ===================================================
 # WebSocket Route

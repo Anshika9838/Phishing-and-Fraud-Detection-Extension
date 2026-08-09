@@ -3,13 +3,29 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Phising & Fraud Detection | Team Paradox</title>
-
-    <link rel="stylesheet" href="popup.css">
+    <title>Theft Alert</title>
+    <link rel="stylesheet" href="../Styles/popup_style.css">
 </head>
 <body>
-    Hello Team Members:)
-
-    <script src="./popup.js"></script>
+    <div class="container">
+        <div class="header">
+            <img src="../resources/icon48.png" alt="Logo" class="logo">
+            <h1>Theft Alert</h1>
+        </div>
+        <div class="status-container">
+            <p>Backend Status: <span id="status-indicator" class="disconnected"></span> <span id="status-text">Disconnected</span></p>
+        </div>
+        <div class="content">
+            <p>Phishing & Fraud Detection by <strong>Team Paradox</strong>.</p>
+        </div>
+        <div class="footer">
+            <button id="github-btn">
+                <span id="github-icon"></span>
+                View on GitHub
+            </button>
+        </div>
+    </div>
+    <script src="../dependencies/iconify.min.js"></script>
+    <script src="popup.js"></script>
 </body>
 </html>
