@@ -1,10 +1,16 @@
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
+from pydantic import BaseModel
 from typing import List
 import logging
 import uvicorn
 import json
+import os
+import requests
+from dotenv import load_dotenv
 
+# Load environment variables from .env file
+load_dotenv()
 # Initialize the FastAPI app
 app = FastAPI(
     title="Theft Alert API",
@@ -29,6 +35,21 @@ formatter = logging.Formatter('%(asctime)s - %(message)s')
 file_handler.setFormatter(formatter)
 
 report_logger.addHandler(file_handler)
+
+# Create a logger for manually reported sites
+manual_report_logger = logging.getLogger("manual_reports")
+manual_report_logger.setLevel(logging.INFO)
+manual_file_handler = logging.FileHandler("manual_reports.log")
+manual_file_handler.setLevel(logging.INFO)
+manual_formatter = logging.Formatter('%(asctime)s - %(message)s')
+manual_file_handler.setFormatter(manual_formatter)
+manual_report_logger.addHandler(manual_file_handler)
+
+# ===================================================
+# Pydantic Models
+# ===================================================
+class UrlCheckRequest(BaseModel):
+    url: str
 # ===================================================
 # CORS Configuration
 # ===================================================
@@ -80,20 +101,94 @@ manager = ConnectionManager()
 async def root():
     return {"status": "online", "service": "Theft Alert API"}
 
+async def check_google_safe_browsing(url: str):
+    """
+    Checks a URL against the Google Safe Browsing API.
+    """
+    api_key = os.getenv("GOOGLE_API_KEY")
+    if not api_key:
+        print("Warning: GOOGLE_API_KEY not found. Skipping safe browsing check.")
+        return {
+            "score": 0.5,
+            "threat_type": "UNKNOWN",
+            "description": "Google Safe Browsing check could not be performed. API key is missing."
+        }
+
+    api_url = f"https://safebrowsing.googleapis.com/v4/threatMatches:find?key={api_key}"
+    payload = {
+        "client": {"clientId": "team-paradox-extension", "clientVersion": "1.0.0"},
+        "threatInfo": {
+            "threatTypes": ["MALWARE", "SOCIAL_ENGINEERING", "UNWANTED_SOFTWARE", "POTENTIALLY_HARMFUL_APPLICATION"],
+            "platformTypes": ["ANY_PLATFORM"],
+            "threatEntryTypes": ["URL"],
+            "threatEntries": [{"url": url}]
+        }
+    }
+
+    try:
+        response = requests.post(api_url, json=payload)
+        response.raise_for_status()
+        data = response.json()
+
+        if "matches" in data:
+            threat_type = data["matches"][0]["threatType"]
+            return {
+                "score": 0.9,  # High score for detected threats
+                "threat_type": threat_type,
+                "description": f"**Warning!** Google has identified this site as a potential threat for **{threat_type.replace('_', ' ').title()}**."
+            }
+        else:
+            return {
+                "score": 0.1,  # Low score for safe sites
+                "threat_type": "SAFE",
+                "description": "This site is not known to host malicious content according to Google Safe Browsing."
+            }
+    except requests.exceptions.RequestException as e:
+        print(f"Error calling Google Safe Browsing API: {e}")
+        return {
+            "score": 0.5,
+            "threat_type": "API_ERROR",
+            "description": f"Could not verify the site. An error occurred while contacting Google Safe Browsing: {e}"
+        }
+
 @app.post("/api/report")
 async def report_url(url_data: dict):
     """
-    Receives website data from the extension, logs it to a file for analysis,
-    and broadcasts a summary to all connected WebSocket clients.
+    Receives detailed website data from the extension, logs it, analyzes the URL,
+    and broadcasts the analysis result to WebSocket clients.
     """
-    domain = url_data.get("domain", "unknown domain")
+    # DEBUG: Log that a request has been received, including the trigger and frame type.
+    print(f"[DEBUG] Backend: Received POST at /api/report. Trigger: {url_data.get('scanTrigger')}, isTopFrame: {url_data.get('isTopFrame')}")
+
+    url_to_check = url_data.get("url")
 
     # Log the full data payload to scan_reports.log for later analysis
-    # Using json.dumps for pretty, readable logging
     report_logger.info(json.dumps(url_data, indent=2))
 
-    await manager.broadcast(f"Scanning report received for: {domain}")
-    return {"message": "URL data received and logged for analysis", "domain": domain}
+    # Perform analysis
+    analysis_result = await check_google_safe_browsing(url_to_check)
+
+    # Broadcast the analysis result to all connected clients (the extension)
+    await manager.broadcast(json.dumps(analysis_result))
+
+    return {"message": "Report received, logged, and analysis broadcasted.", "domain": url_data.get("domain")}
+
+@app.post("/api/check_url")
+async def check_url_only(request: UrlCheckRequest):
+    """
+    Receives a single URL (e.g., from a mobile app), analyzes it,
+    and returns the analysis result directly.
+    """
+    analysis_result = await check_google_safe_browsing(request.url)
+    return analysis_result
+
+@app.post("/api/manual_report")
+async def manual_report(request: UrlCheckRequest):
+    """
+    Receives a manually reported URL from the extension popup and logs it.
+    """
+    manual_report_logger.info(f"Manually reported URL: {request.url}")
+    return {"message": "Site reported successfully. Thank you for your contribution!"}
 
 # ===================================================
 # WebSocket Route

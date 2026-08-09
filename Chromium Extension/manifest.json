@@ -25,9 +25,17 @@
             "run_at": "document_idle"
         }
     ],
+    "web_accessible_resources": [
+        {
+            "resources": ["frontend/threat_alert.html"],
+            "matches": ["<all_urls>"]
+        }
+    ],
     "permissions": [
         "tabs",
-        "notifications"
+        "notifications",
+        "scripting",
+        "storage"
     ],
     "host_permissions": ["<all_urls>"]
 }

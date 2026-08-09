@@ -60,6 +60,21 @@ h1 {
     font-size: 0.95em;
 }
 
+.actions {
+    margin-top: 15px;
+    width: 100%;
+}
+
+#report-btn {
+    width: 100%;
+    padding: 8px;
+    background-color: #e53e3e;
+    color: white;
+    border: none;
+    border-radius: 6px;
+    cursor: pointer;
+}
+
 #github-btn {
     margin-top: 20px;
     padding: 8px 16px;
