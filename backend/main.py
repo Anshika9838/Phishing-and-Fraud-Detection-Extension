@@ -12,6 +12,11 @@ import whois
 from urllib.parse import urlparse
 from dotenv import load_dotenv
 
+try:
+    from llm_analyzer import analyze_scan_report
+except ImportError:  # Allows importing as backend.main during tests/tools.
+    from .llm_analyzer import analyze_scan_report
+
 # Load environment variables from .env file
 load_dotenv()
 # Initialize the FastAPI app
@@ -218,7 +223,8 @@ async def check_google_safe_browsing(url: str):
         print("Warning: GOOGLE_API_KEY not found. Skipping safe browsing check.")
         return {
             "score": 0.5,
-            "threat_type": "UNKNOWN",
+            "threat_type": "MISSING_API_KEY",
+            "source": "Google Safe Browsing",
             "details": "Google Safe Browsing check could not be performed. API key is missing."
         }
 
@@ -257,6 +263,7 @@ async def check_google_safe_browsing(url: str):
         print(f"Error calling Google Safe Browsing API: {e}")
         return {
             "score": 0.5,
+            "threat_type": "API_ERROR",
             "source": "Google Safe Browsing",
             "details": f"API Error: {e}"
         }
@@ -275,33 +282,32 @@ async def report_url(url_data: dict):
     # Log the full data payload to scan_reports.log for later analysis
     report_logger.info(json.dumps(url_data, indent=2))
 
-    # Perform analysis
+    # Perform reputation checks first, then pass the captured page data through
+    # the LLM analyzer so the final score uses the extracted forms/text/links too.
     google_result = await check_google_safe_browsing(url_to_check)
     openphish_result = await check_openphish(url_to_check)
     spamhaus_result = await check_spamhaus(url_to_check)
     domain_details_result = await get_domain_details(url_to_check)
 
     all_results = [google_result, openphish_result, spamhaus_result, domain_details_result]
-
-    # Calculate a weighted final score
-    final_score = sum(res["score"] for res in all_results) / len(all_results)
-    threat_type = "PHISHING" if final_score > 0.7 else "SUSPICIOUS" if final_score > 0.4 else "SAFE"
-
-    # Format the description as markdown
-    description_md = f"### Theft Score: {final_score:.2f}/1.0\n\n---\n\n"
-    for res in all_results:
-        description_md += f"#### {res['source']}\n- **Result:** {res['details']}\n- **Score:** {res['score']}/1.0\n\n"
-
-    final_analysis = {
-        "score": final_score,
-        "threat_type": threat_type,
-        "description": description_md
+    llm_scan_report = {
+        **url_data,
+        "reputation_checks": all_results,
     }
+    final_analysis = analyze_scan_report(llm_scan_report, google_result, use_gemini=True)
+    final_analysis["reputation_checks"] = all_results
+    final_analysis["report_type"] = url_data.get("reportType", "full_page_scan")
+    final_analysis["scan_trigger"] = url_data.get("scanTrigger")
+    final_analysis["page_url"] = url_data.get("sourcePageUrl") or url_to_check
 
     # Broadcast the analysis result to all connected clients (the extension)
     await manager.broadcast(json.dumps(final_analysis))
 
-    return {"message": "Report received, logged, and analysis broadcasted.", "domain": url_data.get("domain")}
+    return {
+        "message": "Report received, logged, analyzed, and broadcasted.",
+        "domain": url_data.get("domain"),
+        "analysis": final_analysis,
+    }
 
 @app.post("/api/check_url")
 async def check_url_only(request: UrlCheckRequest):

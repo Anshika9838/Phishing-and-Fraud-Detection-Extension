@@ -1,15 +1,22 @@
 <div class="alert-container">
-    <div class="alert-icon">⚠️</div>
-    <h1>Warning: Potentially Unsafe Site</h1>
-    <p>
-        Our systems have flagged this website as a potential threat.
-    </p>
-    <div class="threat-details">
-        <strong>Detected Threat Type:</strong> <span id="threat-type"></span>
-        <p id="threat-description"></p>
+    <div class="alert-label">Theft Alert</div>
+    <h1>Potentially Unsafe Site</h1>
+    <p class="alert-summary" id="threat-reason"></p>
+
+    <div class="threat-score-card">
+        <span>Risk score</span>
+        <strong id="threat-score"></strong>
     </div>
-    <p class="recommendation">
-        We recommend you close this page and do not enter any personal information.
-    </p>
-    <button id="close-alert-btn">I understand, let me continue</button>
+
+    <div class="threat-details">
+        <div class="detail-row">
+            <strong>Detected threat type</strong>
+            <span id="threat-type"></span>
+        </div>
+        <p id="threat-description"></p>
+        <ul id="threat-evidence"></ul>
+    </div>
+
+    <p class="recommendation" id="threat-recommendation"></p>
+    <button id="close-alert-btn" type="button">I understand, let me continue</button>
 </div>
