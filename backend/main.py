@@ -7,6 +7,9 @@ import uvicorn
 import json
 import os
 import requests
+import dns.resolver
+import whois
+from urllib.parse import urlparse
 from dotenv import load_dotenv
 
 # Load environment variables from .env file
@@ -101,6 +104,111 @@ manager = ConnectionManager()
 async def root():
     return {"status": "online", "service": "Theft Alert API"}
 
+async def check_openphish(url: str):
+    """Checks a URL against the OpenPhish feed."""
+    try:
+        # OpenPhish provides a simple text feed. We'll check if the domain is in it.
+        domain = urlparse(url).netloc
+        openphish_url = "https://openphish.com/feed.txt"
+        response = requests.get(openphish_url, timeout=5)
+        response.raise_for_status()
+        if domain in response.text:
+            return {
+                "score": 0.9,
+                "source": "OpenPhish",
+                "details": "Domain found in the OpenPhish intelligence feed."
+            }
+        return {
+            "score": 0.1,
+            "source": "OpenPhish",
+            "details": "Domain not listed in the OpenPhish feed."
+        }
+    except requests.RequestException as e:
+        return {
+            "score": 0.5,
+            "source": "OpenPhish",
+            "details": f"Could not check OpenPhish: {e}"
+        }
+
+async def check_spamhaus(url: str):
+    """Checks the domain's IP against Spamhaus DNSBLs."""
+    try:
+        domain = urlparse(url).netloc
+        ip = dns.resolver.resolve(domain, 'A')[0].to_text()
+        reversed_ip = '.'.join(reversed(ip.split('.')))
+        
+        # We will check against two common Spamhaus lists
+        zen_query = f"{reversed_ip}.zen.spamhaus.org"
+        
+        try:
+            dns.resolver.resolve(zen_query, 'A')
+            return {
+                "score": 0.8,
+                "source": "Spamhaus",
+                "details": f"IP address ({ip}) is listed on the Spamhaus Zen blocklist."
+            }
+        except dns.resolver.NXDOMAIN:
+            return {
+                "score": 0.1,
+                "source": "Spamhaus",
+                "details": "IP address is not on the Spamhaus Zen blocklist."
+            }
+    except Exception as e:
+        return {
+            "score": 0.5,
+            "source": "Spamhaus",
+            "details": f"Could not perform Spamhaus check: {e}"
+        }
+
+async def get_domain_details(url: str):
+    """Fetches WHOIS and Qualys SSL Labs details for the domain."""
+    domain = urlparse(url).netloc
+    details = {
+        "whois": "Could not fetch WHOIS data.",
+        "ssl_labs": "Could not fetch SSL Labs data."
+    }
+    
+    # WHOIS lookup
+    try:
+        w = whois.whois(domain)
+        if w.creation_date:
+            # Handle cases where creation_date can be a list
+            creation_date_val = w.creation_date[0] if isinstance(w.creation_date, list) else w.creation_date
+            details["whois"] = f"Registered on: {creation_date_val.strftime('%Y-%m-%d')}. Registrar: {w.registrar}."
+        else:
+            details["whois"] = "Domain registration date not found."
+    except Exception as e:
+        details["whois"] = f"WHOIS lookup failed: {e}"
+
+    # Qualys SSL Labs lookup for cached results
+    try:
+        qualys_api_url = "https://api.ssllabs.com/api/v3/analyze"
+        # Use fromCache to get a recent report without waiting for a new scan.
+        params = {'host': domain, 'fromCache': 'on', 'maxAge': 24}
+        # Increased timeout for potentially slow API responses
+        response = requests.get(qualys_api_url, params=params, timeout=10)
+        response.raise_for_status()
+        qualys_data = response.json()
+        
+        if qualys_data.get('status') == 'READY' and qualys_data.get('endpoints'):
+            grade = qualys_data['endpoints'][0].get('grade', 'N/A')
+            details["ssl_labs"] = f"SSL Labs Grade: **{grade}**. (Based on a cached scan from the last 24 hours)"
+        elif qualys_data.get('status') == 'IN_PROGRESS':
+            details["ssl_labs"] = "No cached SSL Labs report available. A new scan has been initiated."
+        else:
+            # Handle errors or other statuses from Qualys
+            error_message = qualys_data.get('errors', [{}])[0].get('message', 'Unknown status')
+            details["ssl_labs"] = f"SSL Labs check status: {qualys_data.get('status', 'Unknown')}. {error_message}"
+
+    except requests.RequestException as e:
+        details["ssl_labs"] = f"Qualys SSL Labs lookup failed: {e}"
+        
+    return {
+        "score": 0.3, # Neutral score, as this is informational
+        "source": "Domain Details",
+        "details": f"**WHOIS:** {details['whois']}\n**SSL/TLS Config:** {details['ssl_labs']}"
+    }
+
 async def check_google_safe_browsing(url: str):
     """
     Checks a URL against the Google Safe Browsing API.
@@ -111,7 +219,7 @@ async def check_google_safe_browsing(url: str):
         return {
             "score": 0.5,
             "threat_type": "UNKNOWN",
-            "description": "Google Safe Browsing check could not be performed. API key is missing."
+            "details": "Google Safe Browsing check could not be performed. API key is missing."
         }
 
     api_url = f"https://safebrowsing.googleapis.com/v4/threatMatches:find?key={api_key}"
@@ -135,20 +243,22 @@ async def check_google_safe_browsing(url: str):
             return {
                 "score": 0.9,  # High score for detected threats
                 "threat_type": threat_type,
-                "description": f"**Warning!** Google has identified this site as a potential threat for **{threat_type.replace('_', ' ').title()}**."
+                "source": "Google Safe Browsing",
+                "details": f"Identified as a potential threat for **{threat_type.replace('_', ' ').title()}**."
             }
         else:
             return {
                 "score": 0.1,  # Low score for safe sites
                 "threat_type": "SAFE",
-                "description": "This site is not known to host malicious content according to Google Safe Browsing."
+                "source": "Google Safe Browsing",
+                "details": "Not known to host malicious content."
             }
     except requests.exceptions.RequestException as e:
         print(f"Error calling Google Safe Browsing API: {e}")
         return {
             "score": 0.5,
-            "threat_type": "API_ERROR",
-            "description": f"Could not verify the site. An error occurred while contacting Google Safe Browsing: {e}"
+            "source": "Google Safe Browsing",
+            "details": f"API Error: {e}"
         }
 
 @app.post("/api/report")
@@ -166,10 +276,30 @@ async def report_url(url_data: dict):
     report_logger.info(json.dumps(url_data, indent=2))
 
     # Perform analysis
-    analysis_result = await check_google_safe_browsing(url_to_check)
+    google_result = await check_google_safe_browsing(url_to_check)
+    openphish_result = await check_openphish(url_to_check)
+    spamhaus_result = await check_spamhaus(url_to_check)
+    domain_details_result = await get_domain_details(url_to_check)
+
+    all_results = [google_result, openphish_result, spamhaus_result, domain_details_result]
+
+    # Calculate a weighted final score
+    final_score = sum(res["score"] for res in all_results) / len(all_results)
+    threat_type = "PHISHING" if final_score > 0.7 else "SUSPICIOUS" if final_score > 0.4 else "SAFE"
+
+    # Format the description as markdown
+    description_md = f"### Theft Score: {final_score:.2f}/1.0\n\n---\n\n"
+    for res in all_results:
+        description_md += f"#### {res['source']}\n- **Result:** {res['details']}\n- **Score:** {res['score']}/1.0\n\n"
+
+    final_analysis = {
+        "score": final_score,
+        "threat_type": threat_type,
+        "description": description_md
+    }
 
     # Broadcast the analysis result to all connected clients (the extension)
-    await manager.broadcast(json.dumps(analysis_result))
+    await manager.broadcast(json.dumps(final_analysis))
 
     return {"message": "Report received, logged, and analysis broadcasted.", "domain": url_data.get("domain")}
 
