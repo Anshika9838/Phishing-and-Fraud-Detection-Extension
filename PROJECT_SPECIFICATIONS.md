@@ -26,25 +26,22 @@ Modern web threats are increasingly sophisticated, often bypassing traditional b
 
 ### 2.1. High-Level Architecture Diagram (Conceptual)
 
+```mermaid 
+flowchart LR
+    Client["Client<br>(Browser Ext.)"]
+    FastAPI["FastAPI Server<br>(main.py)"]
+    ThreatFeeds["External Threat Feeds<br>(Google, VirusTotal, etc)"]
+    Engine["Analysis Engine<br>(threat_feeds, infra_analyzer, scoring)"]
+    LLM["Google Gemini LLM<br>(llm_analyzer.py)"]
+
+    Client -- "(1) HTTP POST<br>/api/report (URL, Page Metadata)" --> FastAPI
+    FastAPI -- "(3) API Calls" --> ThreatFeeds
+    FastAPI -- "(2) Orchestrates<br>Parallel Analysis" --> Engine
+    Engine -- "(4) LLM API Call" --> LLM
+    LLM -- "(5) JSON Verdict" --> Engine
+    Engine -- "(6) WebSocket<br>Broadcast" --> Client
 ```
-  +----------------+      (1) HTTP POST      +-----------------+      (3) API Calls      +------------------------+
-  | Client         |  /api/report (URL,     |                 |--------------------->| External Threat Feeds  |
-  | (Browser Ext.) |---------------------->|  FastAPI Server |                     | (Google, VirusTotal, etc)|
-  +----------------+      Page Metadata)   |  (main.py)      |--------------------->+------------------------+
-         ^                                 |                 |
-         |                                 +-------+---------+      (4) LLM API Call     +------------------------+
-         |                                         | (2) Orchestrates                  |                        |
-         | (6) WebSocket                           | Parallel Analysis                 |   Google Gemini LLM    |
-         |     Broadcast                           |                                   |   (llm_analyzer.py)    |
-         |                                         v                                   |                        |
-         |                                 +-------+---------+                     +------------------------+
-         |                                 |                 |<--------------------|
-         +---------------------------------| Analysis Engine |      (5) JSON Verdict
-                                           | (threat_feeds,  |
-                                           |  infra_analyzer,|
-                                           |  scoring)       |
-                                           +-----------------+
-```
+
 
 ### 2.2. Component Breakdown
 
