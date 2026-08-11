@@ -19,7 +19,7 @@ import asyncio
 import socket
 import httpx
 import dns.resolver
-from urllib.parse import urlparse
+from urllib.parse import urlparse, quote
 from typing import Dict, Any, Optional, List, Coroutine
 
 # ---------- API KEY FLEXIBLE LOADER ----------
@@ -795,14 +795,18 @@ async def check_openphish(url: str, domain: str, client: httpx.AsyncClient) -> D
         resp = await client.get("https://openphish.com/feed.txt", timeout=8)
         resp.raise_for_status()
         text = resp.text
-        if url in text or domain in text:
+        feed_urls = [line.strip() for line in text.splitlines() if line.strip()]
+        feed_domains = {_clean_domain(feed_url) for feed_url in feed_urls}
+        exact_url_match = url.rstrip("/") in {feed_url.rstrip("/") for feed_url in feed_urls}
+        domain_match = domain in feed_domains
+        if exact_url_match or domain_match:
             return {
                 "source": "OpenPhish",
                 "risk_score": 100,
                 "weight": 7,
                 "verdict": "MALICIOUS",
                 "confidence": 95,
-                "details": f"Domain {domain} found in OpenPhish community feed (verified phishing).",
+                "details": f"{'URL' if exact_url_match else 'Domain'} found in OpenPhish community feed (verified phishing).",
                 "description": "Listed as phishing in OpenPhish feed (free 12h updates)."
             }
         else:
@@ -812,7 +816,7 @@ async def check_openphish(url: str, domain: str, client: httpx.AsyncClient) -> D
                 "weight": 7,
                 "verdict": "SAFE",
                 "confidence": 75,
-                "details": f"Domain {domain} not in OpenPhish feed ({len(text.splitlines())} URLs checked).",
+                "details": f"Domain {domain} not in OpenPhish feed ({len(feed_urls)} URLs checked). OpenPhish does not require an API key for this feed.",
                 "description": "Not listed in OpenPhish phishing database."
             }
     except Exception as e:
@@ -822,14 +826,15 @@ async def check_openphish(url: str, domain: str, client: httpx.AsyncClient) -> D
             "weight": 7,
             "verdict": "UNKNOWN",
             "confidence": 10,
-            "details": f"OpenPhish check failed: {str(e)[:200]}",
-            "description": "Could not check OpenPhish feed."
+            "details": f"OpenPhish public feed check failed: {str(e)[:200]}",
+            "description": "Could not check the public OpenPhish feed; this source does not use a backend API key."
         }
 
 # ---------- CRT.SH ----------
 async def check_crtsh(domain: str, client: httpx.AsyncClient) -> Dict[str, Any]:
     try:
-        resp = await client.get(f"https://crt.sh/?q={domain}&output=json", timeout=12)
+        query_domain = quote(domain, safe="")
+        resp = await client.get(f"https://crt.sh/?q={query_domain}&output=json", timeout=12)
         if resp.status_code != 200:
             return {
                 "source": "crt.sh (CT Logs)",

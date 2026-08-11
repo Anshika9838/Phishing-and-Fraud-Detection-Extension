@@ -483,7 +483,7 @@ async def get_qualys_ssl_grade(domain: str, client: httpx.AsyncClient) -> Dict[s
                 "verdict": "UNKNOWN",
                 "confidence": 15,
                 "details": f"Qualys returned status {resp.status_code}",
-                "description": "Qualys SSL Labs grade unavailable."
+                "description": "Qualys SSL Labs public cached grade unavailable; this source does not use a backend API key."
             }
         data = resp.json()
         status = data.get("status")
@@ -511,7 +511,7 @@ async def get_qualys_ssl_grade(domain: str, client: httpx.AsyncClient) -> Dict[s
                 "verdict": "UNKNOWN",
                 "confidence": 30,
                 "details": f"Qualys status {status} - no cached grade",
-                "description": f"Qualys scan {status} - no recent cached report."
+                "description": f"Qualys scan {status} - no recent cached report. SSL Labs is queried as a public no-key source."
             }
     except Exception as e:
         return {
@@ -521,7 +521,7 @@ async def get_qualys_ssl_grade(domain: str, client: httpx.AsyncClient) -> Dict[s
             "verdict": "UNKNOWN",
             "confidence": 10,
             "details": f"Qualys error: {str(e)[:250]}",
-            "description": "Could not fetch Qualys SSL grade."
+            "description": "Could not fetch the public Qualys SSL Labs grade; this source does not use a backend API key."
         }
 
 async def run_infra_checks(url: str, page_data: dict = None) -> dict:

@@ -2,6 +2,7 @@ const BACKEND_API_URL = "http://localhost:8000/api/report";
 const MANUAL_REPORT_API_URL = "http://localhost:8000/api/manual_report";
 const BACKEND_WS_URL = "ws://localhost:8000/ws/chrome-extension";
 const RECENT_ANALYSIS_TTL_MS = 15000;
+const SCAN_STATE_TTL_MS = 180000;
 
 // ===================================================
 // Service Worker Lifecycle Management
@@ -31,6 +32,25 @@ let isWsConnected = false;
 let reconnectionTimer = null;
 let activeScans = new Map(); // Track active scans by tabId
 const recentAnalysisByTab = new Map();
+
+async function setScanState(tabId, scanState) {
+    if (!tabId) return;
+
+    if (scanState) {
+        activeScans.set(tabId, scanState);
+        await chrome.storage.local.set({ [`scan_state_${tabId}`]: scanState });
+        chrome.runtime.sendMessage({
+            type: 'SCAN_STARTED',
+            tabId,
+            url: scanState.url,
+            scanTrigger: scanState.scanTrigger
+        }, () => { if (chrome.runtime.lastError) { /* Popup not open, ignore */ } });
+        return;
+    }
+
+    activeScans.delete(tabId);
+    await chrome.storage.local.remove(`scan_state_${tabId}`);
+}
 
 /**
  * Establishes a WebSocket connection with the backend.
@@ -138,33 +158,34 @@ function renderBroadcastAnalysis(analysis) {
         const tab = matchingTab || activeTab;
 
         if (tab?.id) {
-            renderAnalysisForTab(tab.id, analysis);
+            renderAnalysisForTab(tab.id, analysis).catch((error) => {
+                console.error("Failed to render broadcast analysis:", error);
+            });
         }
     });
 }
 
-function renderAnalysisForTab(tabId, analysis) {
+async function renderAnalysisForTab(tabId, analysis) {
     // Save the latest analysis for this tab to be retrieved by the popup later.
-    activeScans.delete(tabId); // Scan is complete for this tab
-    chrome.storage.local.set({ [`latest_analysis_${tabId}`]: analysis });
+    await setScanState(tabId, null);
+    await chrome.storage.local.set({ [`latest_analysis_${tabId}`]: analysis });
+    await updateScanHistory(analysis);
 
     const viewModel = buildAnalysisViewModel(analysis);
+
+    // Also send a direct message to the popup if it's open
+    const { scanHistory = [] } = await chrome.storage.local.get('scanHistory');
+    chrome.runtime.sendMessage({
+        type: 'ANALYSIS_COMPLETE',
+        analysis: analysis,
+        history: scanHistory
+    }, () => {
+        if (chrome.runtime.lastError) { /* Popup not open, ignore */ }
+    });
+
     if (!shouldDisplayAnalysis(tabId, viewModel)) {
         return;
     }
-
-    // Also send a direct message to the popup if it's open
-    (async () => {
-        const { scanHistory = [] } = await chrome.storage.local.get('scanHistory');
-        chrome.runtime.sendMessage({
-            type: 'ANALYSIS_COMPLETE',
-            analysis: analysis,
-            history: scanHistory
-        }, () => {
-            if (chrome.runtime.lastError) { /* Popup not open, ignore */ }
-        });
-    })();
-
 
     // Show in-page alerts
     if (viewModel.threatType === 'SAFE' || viewModel.riskScore < 40) {
@@ -190,13 +211,21 @@ function shouldDisplayAnalysis(tabId, viewModel) {
 async function updateScanHistory(analysis) {
     if (!analysis || !analysis.domain) return;
 
-    const { scanHistory = [] } = await chrome.storage.local.get('scanHistory');
+    const { scanHistory: storedScanHistory = [] } = await chrome.storage.local.get('scanHistory');
+    const scanHistory = Array.isArray(storedScanHistory) ? storedScanHistory : [];
+    const normalizedDomain = String(analysis.domain || '').replace(/^www\./, '').toLowerCase();
+    const historyEntry = {
+        ...analysis,
+        domain: normalizedDomain || analysis.domain,
+        scan_trigger: analysis.scan_trigger || analysis.scanTrigger || 'unknown',
+        checked_at: analysis.checked_at || new Date().toISOString(),
+    };
 
     // Remove previous entry for the same domain to prevent duplicates
-    const filteredHistory = scanHistory.filter(item => item.domain !== analysis.domain);
+    const filteredHistory = scanHistory.filter(item => String(item.domain || '').replace(/^www\./, '').toLowerCase() !== historyEntry.domain);
 
     // Add the new analysis to the front of the array
-    const newHistory = [analysis, ...filteredHistory];
+    const newHistory = [historyEntry, ...filteredHistory];
 
     // Keep only the 5 most recent unique domain scans
     const trimmedHistory = newHistory.slice(0, 5);
@@ -439,27 +468,25 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         console.log(`[DEBUG] service_worker.js | ID: ${WORKER_INSTANCE_ID} | I am the active worker. Processing message.`);
         if (message.type === "PAGE_DATA") {
             console.log(`Received page data from tab: ${sender.tab.id}, frameId: ${frameId}`);
-                activeScans.set(sender.tab.id, true); // Mark scan as active for this tab
             const reportData = { ...message.data, reportType: 'full_page_scan' };
 
             // Show processing indicator immediately for top-frame scans
             if (reportData.isTopFrame && sender.tab?.id) {
+                await setScanState(sender.tab.id, {
+                    url: reportData.url,
+                    scanTrigger: reportData.scanTrigger || 'initial_load',
+                    startedAt: Date.now(),
+                });
                 showProcessingIndicator(sender.tab.id);
-
-                // Also notify the popup immediately that a scan has started
-                chrome.runtime.sendMessage({
-                    type: 'SCAN_STARTED',
-                    tabId: sender.tab.id,
-                    url: reportData.url
-                }, () => { if (chrome.runtime.lastError) { /* Popup not open, ignore */ } });
             }
 
             const result = await sendDataToBackend(reportData, BACKEND_API_URL);
 
             if (result?.analysis && sender.tab?.id) {
                 const fullAnalysis = result.analysis;
-                await updateScanHistory(fullAnalysis);
-                renderAnalysisForTab(sender.tab.id, fullAnalysis);
+                await renderAnalysisForTab(sender.tab.id, fullAnalysis);
+            } else if (sender.tab?.id) {
+                await setScanState(sender.tab.id, null);
             }
         } else if (message.type === "NETWORK_REQUEST") {
             console.log("Received network request from tab:", sender.tab.id, message.data.url);
@@ -478,23 +505,43 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
             broadcastWsStatus();
         } else if (message.type === 'GET_POPUP_DATA') {
             (async () => {
-                const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
-                if (!tab || !tab.id) {
-                    sendResponse({ tab: null, analysis: null, history: [], isConnected: isWsConnected });
-                    return;
+                try {
+                    const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+                    if (!tab || !tab.id) {
+                        sendResponse({ tab: null, analysis: null, history: [], isConnected: isWsConnected, isScanning: false });
+                        return;
+                    }
+                    const { [`latest_analysis_${tab.id}`]: analysis } = await chrome.storage.local.get(`latest_analysis_${tab.id}`);
+                    const { [`scan_state_${tab.id}`]: storedScanState } = await chrome.storage.local.get(`scan_state_${tab.id}`);
+                    const { scanHistory: storedScanHistory = [] } = await chrome.storage.local.get('scanHistory');
+                    const scanHistory = Array.isArray(storedScanHistory) ? storedScanHistory : [];
+                    let scanState = activeScans.get(tab.id) || storedScanState || null;
+                    if (scanState?.startedAt && Date.now() - scanState.startedAt > SCAN_STATE_TTL_MS) {
+                        await setScanState(tab.id, null);
+                        scanState = null;
+                    }
+                    sendResponse({ tab, analysis: analysis || null, history: scanHistory, isConnected: isWsConnected, isScanning: Boolean(scanState), scanState });
+                } catch (error) {
+                    console.error("Failed to get popup data:", error);
+                    sendResponse({ tab: null, analysis: null, history: [], isConnected: isWsConnected, isScanning: false });
                 }
-                const { [`latest_analysis_${tab.id}`]: analysis } = await chrome.storage.local.get(`latest_analysis_${tab.id}`);
-                const { scanHistory = [] } = await chrome.storage.local.get('scanHistory');
-                sendResponse({ tab, analysis: analysis || null, history: scanHistory, isConnected: isWsConnected });
             })();
             return true; // Keep message channel open for async response
         } else if (message.type === 'TRIGGER_MANUAL_SCAN') {
             if (message.tabId) {
+                const tab = await chrome.tabs.get(message.tabId);
+                await setScanState(message.tabId, {
+                    url: tab?.url || '',
+                    scanTrigger: 'manual_popup',
+                    startedAt: Date.now(),
+                });
+                showProcessingIndicator(message.tabId);
                 // Ask the content script in the target tab to collect and send its data.
                 // Explicitly target frameId: 0 to ensure we message the main document, not an iframe.
                 chrome.tabs.sendMessage(message.tabId, { type: "REQUEST_PAGE_DATA", trigger: "manual_popup" }, { frameId: 0 })
                     .catch(error => {
                         console.error(`Could not send 'REQUEST_PAGE_DATA' to tab ${message.tabId}. The content script might not be active or injected on this page. Error: ${error.message}`);
+                        setScanState(message.tabId, null);
                     });
             }
         }

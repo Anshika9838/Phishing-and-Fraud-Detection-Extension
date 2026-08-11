@@ -14,10 +14,12 @@ try:
     from llm_analyzer import analyze_scan_report
     from threat_feeds import run_all_reputation_checks
     from infra_analyzer import run_infra_checks
+    from scoring import calculate_overall_score
 except ImportError:  # Allows importing as backend.main during tests/tools.
     from .llm_analyzer import analyze_scan_report
     from .threat_feeds import run_all_reputation_checks
     from .infra_analyzer import run_infra_checks
+    from .scoring import calculate_overall_score
 
 # Load environment variables from .env file
 load_dotenv()
@@ -216,6 +218,41 @@ async def check_url_only(request: UrlCheckRequest):
     analysis_result = reputation_results
 
     return analysis_result
+
+@app.post("/api/scan_url")
+async def scan_url_public(request: UrlCheckRequest):
+    """
+    Public URL-only scan endpoint.
+
+    The caller only sends a URL. API keys remain server-side in the backend
+    .env file, while the response includes source-by-source results and an
+    overall risk summary.
+    """
+    url_to_check = request.url.strip()
+    parsed_url = urlparse(url_to_check if "://" in url_to_check else f"https://{url_to_check}")
+    domain_to_check = parsed_url.netloc
+    if "://" not in url_to_check:
+        url_to_check = f"https://{url_to_check}"
+
+    reputation_task = run_all_reputation_checks(url_to_check)
+    infra_task = run_infra_checks(url_to_check, {"url": url_to_check, "domain": domain_to_check})
+    reputation_results, infra_results = await asyncio.gather(reputation_task, infra_task)
+
+    all_checks = reputation_results.get("checks", []) + infra_results.get("checks", [])
+    summary = calculate_overall_score(all_checks)
+
+    return {
+        "url": url_to_check,
+        "domain": reputation_results.get("domain") or infra_results.get("domain") or domain_to_check,
+        "ip": reputation_results.get("ip"),
+        "overall": summary,
+        "reputation_checks": reputation_results.get("checks", []),
+        "infrastructure_checks": infra_results.get("checks", []),
+        "checks": all_checks,
+        "api_key_required_from_client": False,
+        "description": summary.get("description"),
+        "recommendation": summary.get("recommendation"),
+    }
 
 @app.post("/api/manual_report")
 async def manual_report(request: UrlCheckRequest):

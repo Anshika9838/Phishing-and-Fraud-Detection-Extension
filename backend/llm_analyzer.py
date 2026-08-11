@@ -278,7 +278,7 @@ def _heuristic_result(
     summary = _build_scan_summary(scan_report)
     counts = summary["counts"]
     url_signals = summary["url_signals"]
-    safe_type = str(safe_browsing_result.get("threat_type") or "UNKNOWN").upper()
+    safe_type = str(safe_browsing_result.get("threat_type") or safe_browsing_result.get("verdict") or "UNKNOWN").upper()
     safe_hit = safe_type not in SAFE_BROWSING_NON_HITS
 
     risk = 10
@@ -344,7 +344,7 @@ def _normalize_result(
     source: str,
 ) -> Dict[str, Any]:
     raw_result = raw_result or {}
-    safe_type = str(safe_browsing_result.get("threat_type") or "UNKNOWN").upper()
+    safe_type = str(safe_browsing_result.get("threat_type") or safe_browsing_result.get("verdict") or "UNKNOWN").upper()
     safe_hit = safe_type not in SAFE_BROWSING_NON_HITS
     risk_score = _coerce_score(raw_result.get("risk_score", raw_result.get("score")), default=50)
 

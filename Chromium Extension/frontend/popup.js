@@ -6,6 +6,7 @@ const statusIndicator = document.getElementById('status-indicator');
 let currentTab = null;
 let currentAnalysis = null;
 let scanHistory = [];
+let isScanning = false;
 
 const templates = {
     home: document.getElementById('home-view-template'),
@@ -18,24 +19,30 @@ const templates = {
  * Main initialization function.
  */
 document.addEventListener('DOMContentLoaded', async () => {
-    // Request initial data from the service worker
-    const popupData = await chrome.runtime.sendMessage({ type: 'GET_POPUP_DATA' });
-
-    currentTab = popupData.tab;
-    currentAnalysis = popupData.analysis;
-    scanHistory = popupData.history;
-    updateStatusIndicator(popupData.isConnected);
-
-    if (popupData.isScanning) { // Show loading if a scan is in progress
-        renderLoadingView();
-    } else if (currentAnalysis) {
-        renderResultsView(currentAnalysis);
-    } else {
-        renderHomeView();
-    }
-
     homeBtn.addEventListener('click', () => showView('home'));
     historyBtn.addEventListener('click', () => showView('history'));
+
+    try {
+        // Request initial data from the service worker
+        const popupData = await chrome.runtime.sendMessage({ type: 'GET_POPUP_DATA' });
+
+        currentTab = popupData?.tab || null;
+        currentAnalysis = popupData?.analysis || null;
+        scanHistory = Array.isArray(popupData?.history) ? popupData.history : [];
+        isScanning = Boolean(popupData?.isScanning);
+        updateStatusIndicator(Boolean(popupData?.isConnected));
+
+        if (isScanning) { // Show loading if a scan is in progress
+            renderLoadingView();
+        } else if (currentAnalysis) {
+            renderResultsView(currentAnalysis);
+        } else {
+            renderHomeView();
+        }
+    } catch (error) {
+        console.error('[DEBUG] popup.js: Failed to initialize popup', error);
+        renderHomeView();
+    }
 });
 
 /**
@@ -55,18 +62,20 @@ chrome.runtime.onMessage.addListener((message, sender) => {
         }
     };
 
-    if (message.type === 'ANALYSIS_COMPLETE' && normalizeUrl(message.analysis.page_url) === normalizeUrl(currentTab?.url)) {
-        currentAnalysis = message.analysis;
-        scanHistory = message.history; // History is updated with the new scan
+    if (message.type === 'ANALYSIS_COMPLETE' && normalizeUrl(message.analysis?.page_url || message.analysis?.url) === normalizeUrl(currentTab?.url)) {
+        isScanning = false;
+        currentAnalysis = message.analysis || null;
+        scanHistory = Array.isArray(message.history) ? message.history : scanHistory;
         renderResultsView(currentAnalysis);
     } else if (message.type === 'SCAN_STARTED' && message.tabId === currentTab?.id) {
         // If a scan starts for the current tab, show loading view
+        isScanning = true;
         renderLoadingView();
     } else if (message.type === 'WS_STATUS') {
         updateStatusIndicator(message.isConnected);
     } else if (message.type === 'ANALYSIS_COMPLETE') {
         // Log why the analysis was not displayed if the URLs didn't match
-        console.warn(`[DEBUG] popup.js: Ignored ANALYSIS_COMPLETE because URLs did not match. Popup URL: ${normalizeUrl(currentTab?.url)}, Analysis URL: ${normalizeUrl(message.analysis.page_url)}`);
+        console.warn(`[DEBUG] popup.js: Ignored ANALYSIS_COMPLETE because URLs did not match. Popup URL: ${normalizeUrl(currentTab?.url)}, Analysis URL: ${normalizeUrl(message.analysis?.page_url || message.analysis?.url)}`);
     }
 });
 
@@ -80,7 +89,8 @@ function showView(viewName) {
     historyBtn.classList.toggle('active', viewName === 'history');
 
     if (viewName === 'home') {
-        currentAnalysis ? renderResultsView(currentAnalysis) : renderHomeView();
+        if (isScanning) renderLoadingView();
+        else currentAnalysis ? renderResultsView(currentAnalysis) : renderHomeView();
     } else if (viewName === 'history') {
         renderHistoryView();
     }
@@ -91,8 +101,19 @@ function renderView(templateId, setupFn) {
     if (!template) return;
     viewContainer.innerHTML = '';
     const view = template.content.cloneNode(true);
-    if (setupFn) {
-        setupFn(view);
+    try {
+        if (setupFn) {
+            setupFn(view);
+        }
+    } catch (error) {
+        console.error(`[DEBUG] popup.js: Failed to render ${templateId} view`, error);
+        viewContainer.textContent = '';
+        const fallback = document.createElement('div');
+        fallback.className = 'view';
+        fallback.innerHTML = '<h2>Scan unavailable</h2><p class="url-display">The latest scan result could not be displayed.</p><button id="scan-current-page-btn" class="action-btn">Scan Current Page</button>';
+        fallback.querySelector('#scan-current-page-btn').addEventListener('click', requestScan);
+        viewContainer.appendChild(fallback);
+        return;
     }
     viewContainer.appendChild(view);
 }
@@ -120,6 +141,11 @@ function renderLoadingView() {
 }
 
 function renderResultsView(analysis) {
+    if (!analysis || typeof analysis !== 'object') {
+        renderHomeView();
+        return;
+    }
+
     renderView('results', (view) => {
         const score = analysis.risk_score;
         const scoreCircle = view.querySelector('.score-circle');
@@ -127,17 +153,17 @@ function renderResultsView(analysis) {
         if (score >= 75) scoreCircle.classList.add('malicious');
         else if (score >= 40) scoreCircle.classList.add('suspicious');
 
-        view.querySelector('.score-value').textContent = score;
-        view.querySelector('.threat-type').textContent = analysis.threat_type.replace(/_/g, ' ');
-        view.querySelector('.url-display').textContent = analysis.url;
-        view.querySelector('.brief-reason').textContent = analysis.brief_reason;
-        view.querySelector('.recommendation').textContent = analysis.recommendation;
-        view.querySelector('.llm-description').textContent = analysis.description;
+        view.querySelector('.score-value').textContent = Number.isFinite(Number(score)) ? score : '--';
+        view.querySelector('.threat-type').textContent = String(analysis.threat_type || 'UNKNOWN').replace(/_/g, ' ');
+        view.querySelector('.url-display').textContent = analysis.page_url || analysis.url || '';
+        view.querySelector('.brief-reason').textContent = analysis.brief_reason || 'Scan completed.';
+        view.querySelector('.recommendation').textContent = analysis.recommendation || '';
+        view.querySelector('.llm-description').textContent = analysis.description || '';
 
         // Populate evidence
         const evidenceList = view.querySelector('.evidence-list');
         evidenceList.innerHTML = '';
-        analysis.evidence.forEach(item => {
+        (analysis.evidence || []).forEach(item => {
             const li = document.createElement('li');
             li.textContent = item;
             evidenceList.appendChild(li);
@@ -146,18 +172,24 @@ function renderResultsView(analysis) {
         // Populate reputation checks
         const checksContainer = view.querySelector('.reputation-checks');
         checksContainer.innerHTML = '';
-        analysis.reputation_checks.forEach(check => {
+        const reputationChecks = Array.isArray(analysis.reputation_checks) ? analysis.reputation_checks : [];
+        reputationChecks.filter(Boolean).forEach(check => {
             const item = document.createElement('div');
             item.className = 'check-item';
-            const risk = check.risk_score ?? (check.score * 100);
-            const verdict = check.verdict || 'UNKNOWN';
-            item.innerHTML = `
-                <div class="check-item-header">
-                    <span class="check-item-source">${check.source}</span>
-                    <span class="check-item-score ${verdict}">${verdict.replace(/_/g, ' ')}</span>
-                </div>
-                <p class="check-item-details">${check.description || check.details}</p>
-            `;
+            const verdict = String(check.verdict || check.threat_type || 'UNKNOWN').replace(/[^A-Z0-9_]+/gi, '_').toUpperCase();
+            const header = document.createElement('div');
+            header.className = 'check-item-header';
+            const source = document.createElement('span');
+            source.className = 'check-item-source';
+            source.textContent = String(check.source || 'Unknown source');
+            const verdictBadge = document.createElement('span');
+            verdictBadge.className = `check-item-score ${verdict}`;
+            verdictBadge.textContent = verdict.replace(/_/g, ' ');
+            const details = document.createElement('p');
+            details.className = 'check-item-details';
+            details.textContent = String(check.description || check.details || 'No source details returned.');
+            header.append(source, verdictBadge);
+            item.append(header, details);
             checksContainer.appendChild(item);
         });
 
@@ -171,12 +203,13 @@ function renderHistoryView() {
         const historyList = view.querySelector('#history-list');
         historyList.innerHTML = '';
 
-        if (scanHistory.length === 0) {
+        const historyItems = Array.isArray(scanHistory) ? scanHistory.filter(Boolean) : [];
+        if (historyItems.length === 0) {
             historyList.innerHTML = '<p>No scan history found.</p>';
             return;
         }
 
-        scanHistory.forEach(item => {
+        historyItems.forEach(item => {
             const div = document.createElement('div');
             div.className = 'history-item';
             const score = item.risk_score;
@@ -184,8 +217,13 @@ function renderHistoryView() {
             if (score >= 75) scoreClass = 'malicious';
             else if (score >= 40) scoreClass = 'suspicious';
 
+            const trigger = String(item.scan_trigger || item.scanTrigger || 'unknown').replace(/_/g, ' ');
+            const checkedAt = item.checked_at ? new Date(item.checked_at).toLocaleString() : '';
             div.innerHTML = `
-                <span class="history-item-domain">${item.domain}</span>
+                <span class="history-item-main">
+                    <span class="history-item-domain">${item.domain}</span>
+                    <span class="history-item-meta">${trigger}${checkedAt ? ` - ${checkedAt}` : ''}</span>
+                </span>
                 <span class="history-item-score ${scoreClass}">${score}</span>
             `;
             div.addEventListener('click', () => {
@@ -202,6 +240,7 @@ function renderHistoryView() {
  */
 function requestScan() {
     if (!currentTab || !currentTab.id) return;
+    isScanning = true;
     renderLoadingView();
     chrome.runtime.sendMessage({ type: 'TRIGGER_MANUAL_SCAN', tabId: currentTab.id });
 }
