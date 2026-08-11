@@ -32,26 +32,27 @@ app = FastAPI(
 # Create a logger for saving scan reports to a file.
 # This will create a 'scan_reports.log' file in your backend directory.
 report_logger = logging.getLogger("scan_reports")
+report_logger = logging.getLogger("scan_reports")
 report_logger.setLevel(logging.INFO)
+report_logger.propagate = False  # stop it from also bubbling to the root logger
 
-# Create a file handler
-file_handler = logging.FileHandler("scan_reports.log")
-file_handler.setLevel(logging.INFO)
+if not report_logger.handlers:
+    file_handler = logging.FileHandler("scan_reports.log")
+    file_handler.setLevel(logging.INFO)
+    formatter = logging.Formatter('%(asctime)s - %(message)s')
+    file_handler.setFormatter(formatter)
+    report_logger.addHandler(file_handler)
 
-# Create a formatter and add it to the handler
-formatter = logging.Formatter('%(asctime)s - %(message)s')
-file_handler.setFormatter(formatter)
-
-report_logger.addHandler(file_handler)
-
-# Create a logger for manually reported sites
 manual_report_logger = logging.getLogger("manual_reports")
 manual_report_logger.setLevel(logging.INFO)
-manual_file_handler = logging.FileHandler("manual_reports.log")
-manual_file_handler.setLevel(logging.INFO)
-manual_formatter = logging.Formatter('%(asctime)s - %(message)s')
-manual_file_handler.setFormatter(manual_formatter)
-manual_report_logger.addHandler(manual_file_handler)
+manual_report_logger.propagate = False
+
+if not manual_report_logger.handlers:
+    manual_file_handler = logging.FileHandler("manual_reports.log")
+    manual_file_handler.setLevel(logging.INFO)
+    manual_formatter = logging.Formatter('%(asctime)s - %(message)s')
+    manual_file_handler.setFormatter(manual_formatter)
+    manual_report_logger.addHandler(manual_file_handler)
 
 # ===================================================
 # Pydantic Models

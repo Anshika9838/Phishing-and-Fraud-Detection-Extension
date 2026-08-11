@@ -243,6 +243,9 @@ function showThreatAlert(tabId, viewModel) {
     chrome.scripting.executeScript({
         target: { tabId: tabId },
         func: (model) => {
+            // DEBUG: Log the full analysis result to the page's console.
+            console.log('[DEBUG] Backend Analysis Result (Threat):', analysisResult);
+
             document.getElementById('theft-alert-overlay')?.remove();
 
             const overlay = document.createElement('div');
