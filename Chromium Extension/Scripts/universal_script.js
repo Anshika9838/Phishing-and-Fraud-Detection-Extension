@@ -237,4 +237,16 @@ window.addEventListener('load', () => {
     observeDOMChanges();
     interceptNetworkRequests();
 });
+
+    // Listen for on-demand scan requests from the popup/service worker.
+    chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
+        if (message.type === "REQUEST_PAGE_DATA") {
+            console.log(`[DEBUG] universal_script.js | Instance ${scriptInstanceId} | Received on-demand REQUEST_PAGE_DATA. Trigger: ${message.trigger}`);
+            collectPageData(message.trigger || 'manual_popup');
+            // Acknowledge the message.
+            sendResponse({ status: "data_collection_triggered" });
+        }
+        // Keep the message channel open for the async response.
+        return true;
+    });
 })();

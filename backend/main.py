@@ -1,21 +1,23 @@
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
-from typing import List
+from typing import List, Dict, Any
 import logging
 import uvicorn
 import json
 import os
-import requests
-import dns.resolver
-import whois
+import asyncio
 from urllib.parse import urlparse
 from dotenv import load_dotenv
 
 try:
     from llm_analyzer import analyze_scan_report
+    from threat_feeds import run_all_reputation_checks
+    from infra_analyzer import run_infra_checks
 except ImportError:  # Allows importing as backend.main during tests/tools.
     from .llm_analyzer import analyze_scan_report
+    from .threat_feeds import run_all_reputation_checks
+    from .infra_analyzer import run_infra_checks
 
 # Load environment variables from .env file
 load_dotenv()
@@ -53,6 +55,18 @@ if not manual_report_logger.handlers:
     manual_formatter = logging.Formatter('%(asctime)s - %(message)s')
     manual_file_handler.setFormatter(manual_formatter)
     manual_report_logger.addHandler(manual_file_handler)
+
+analysis_results_logger = logging.getLogger("analysis_results")
+analysis_results_logger.setLevel(logging.INFO)
+analysis_results_logger.propagate = False
+
+if not analysis_results_logger.handlers:
+    analysis_results_handler = logging.FileHandler("analysis_results.log")
+    analysis_results_handler.setLevel(logging.INFO)
+    analysis_results_formatter = logging.Formatter('%(asctime)s - %(message)s')
+    analysis_results_handler.setFormatter(analysis_results_formatter)
+    analysis_results_logger.addHandler(analysis_results_handler)
+
 
 # ===================================================
 # Pydantic Models
@@ -110,193 +124,71 @@ manager = ConnectionManager()
 async def root():
     return {"status": "online", "service": "Theft Alert API"}
 
-async def check_openphish(url: str):
-    """Checks a URL against the OpenPhish feed."""
-    try:
-        # OpenPhish provides a simple text feed. We'll check if the domain is in it.
-        domain = urlparse(url).netloc
-        openphish_url = "https://openphish.com/feed.txt"
-        response = requests.get(openphish_url, timeout=5)
-        response.raise_for_status()
-        if domain in response.text:
-            return {
-                "score": 0.9,
-                "source": "OpenPhish",
-                "details": "Domain found in the OpenPhish intelligence feed."
-            }
-        return {
-            "score": 0.1,
-            "source": "OpenPhish",
-            "details": "Domain not listed in the OpenPhish feed."
-        }
-    except requests.RequestException as e:
-        return {
-            "score": 0.5,
-            "source": "OpenPhish",
-            "details": f"Could not check OpenPhish: {e}"
-        }
-
-async def check_spamhaus(url: str):
-    """Checks the domain's IP against Spamhaus DNSBLs."""
-    try:
-        domain = urlparse(url).netloc
-        ip = dns.resolver.resolve(domain, 'A')[0].to_text()
-        reversed_ip = '.'.join(reversed(ip.split('.')))
-        
-        # We will check against two common Spamhaus lists
-        zen_query = f"{reversed_ip}.zen.spamhaus.org"
-        
-        try:
-            dns.resolver.resolve(zen_query, 'A')
-            return {
-                "score": 0.8,
-                "source": "Spamhaus",
-                "details": f"IP address ({ip}) is listed on the Spamhaus Zen blocklist."
-            }
-        except dns.resolver.NXDOMAIN:
-            return {
-                "score": 0.1,
-                "source": "Spamhaus",
-                "details": "IP address is not on the Spamhaus Zen blocklist."
-            }
-    except Exception as e:
-        return {
-            "score": 0.5,
-            "source": "Spamhaus",
-            "details": f"Could not perform Spamhaus check: {e}"
-        }
-
-async def get_domain_details(url: str):
-    """Fetches WHOIS and Qualys SSL Labs details for the domain."""
-    domain = urlparse(url).netloc
-    details = {
-        "whois": "Could not fetch WHOIS data.",
-        "ssl_labs": "Could not fetch SSL Labs data."
-    }
-    
-    # WHOIS lookup
-    try:
-        w = whois.whois(domain)
-        if w.creation_date:
-            # Handle cases where creation_date can be a list
-            creation_date_val = w.creation_date[0] if isinstance(w.creation_date, list) else w.creation_date
-            details["whois"] = f"Registered on: {creation_date_val.strftime('%Y-%m-%d')}. Registrar: {w.registrar}."
-        else:
-            details["whois"] = "Domain registration date not found."
-    except Exception as e:
-        details["whois"] = f"WHOIS lookup failed: {e}"
-
-    # Qualys SSL Labs lookup for cached results
-    try:
-        qualys_api_url = "https://api.ssllabs.com/api/v3/analyze"
-        # Use fromCache to get a recent report without waiting for a new scan.
-        params = {'host': domain, 'fromCache': 'on', 'maxAge': 24}
-        # Increased timeout for potentially slow API responses
-        response = requests.get(qualys_api_url, params=params, timeout=10)
-        response.raise_for_status()
-        qualys_data = response.json()
-        
-        if qualys_data.get('status') == 'READY' and qualys_data.get('endpoints'):
-            grade = qualys_data['endpoints'][0].get('grade', 'N/A')
-            details["ssl_labs"] = f"SSL Labs Grade: **{grade}**. (Based on a cached scan from the last 24 hours)"
-        elif qualys_data.get('status') == 'IN_PROGRESS':
-            details["ssl_labs"] = "No cached SSL Labs report available. A new scan has been initiated."
-        else:
-            # Handle errors or other statuses from Qualys
-            error_message = qualys_data.get('errors', [{}])[0].get('message', 'Unknown status')
-            details["ssl_labs"] = f"SSL Labs check status: {qualys_data.get('status', 'Unknown')}. {error_message}"
-
-    except requests.RequestException as e:
-        details["ssl_labs"] = f"Qualys SSL Labs lookup failed: {e}"
-        
-    return {
-        "score": 0.3, # Neutral score, as this is informational
-        "source": "Domain Details",
-        "details": f"**WHOIS:** {details['whois']}\n**SSL/TLS Config:** {details['ssl_labs']}"
-    }
-
-async def check_google_safe_browsing(url: str):
-    """
-    Checks a URL against the Google Safe Browsing API.
-    """
-    api_key = os.getenv("GOOGLE_API_KEY")
-    if not api_key:
-        print("Warning: GOOGLE_API_KEY not found. Skipping safe browsing check.")
-        return {
-            "score": 0.5,
-            "threat_type": "MISSING_API_KEY",
-            "source": "Google Safe Browsing",
-            "details": "Google Safe Browsing check could not be performed. API key is missing."
-        }
-
-    api_url = f"https://safebrowsing.googleapis.com/v4/threatMatches:find?key={api_key}"
-    payload = {
-        "client": {"clientId": "team-paradox-extension", "clientVersion": "1.0.0"},
-        "threatInfo": {
-            "threatTypes": ["MALWARE", "SOCIAL_ENGINEERING", "UNWANTED_SOFTWARE", "POTENTIALLY_HARMFUL_APPLICATION"],
-            "platformTypes": ["ANY_PLATFORM"],
-            "threatEntryTypes": ["URL"],
-            "threatEntries": [{"url": url}]
-        }
-    }
-
-    try:
-        response = requests.post(api_url, json=payload)
-        response.raise_for_status()
-        data = response.json()
-
-        if "matches" in data:
-            threat_type = data["matches"][0]["threatType"]
-            return {
-                "score": 0.9,  # High score for detected threats
-                "threat_type": threat_type,
-                "source": "Google Safe Browsing",
-                "details": f"Identified as a potential threat for **{threat_type.replace('_', ' ').title()}**."
-            }
-        else:
-            return {
-                "score": 0.1,  # Low score for safe sites
-                "threat_type": "SAFE",
-                "source": "Google Safe Browsing",
-                "details": "Not known to host malicious content."
-            }
-    except requests.exceptions.RequestException as e:
-        print(f"Error calling Google Safe Browsing API: {e}")
-        return {
-            "score": 0.5,
-            "threat_type": "API_ERROR",
-            "source": "Google Safe Browsing",
-            "details": f"API Error: {e}"
-        }
-
 @app.post("/api/report")
 async def report_url(url_data: dict):
     """
     Receives detailed website data from the extension, logs it, analyzes the URL,
     and broadcasts the analysis result to WebSocket clients.
     """
-    # DEBUG: Log that a request has been received, including the trigger and frame type.
-    print(f"[DEBUG] Backend: Received POST at /api/report. Trigger: {url_data.get('scanTrigger')}, isTopFrame: {url_data.get('isTopFrame')}")
-
     url_to_check = url_data.get("url")
+    domain_to_check = urlparse(url_to_check).netloc if url_to_check else "N/A"
+
+    # 1. Debugger anchor to print the domain
+    print(f"--- [DEBUG ANCHOR] --- Processing request for domain: {domain_to_check} ---")
 
     # Log the full data payload to scan_reports.log for later analysis
     report_logger.info(json.dumps(url_data, indent=2))
 
-    # Perform reputation checks first, then pass the captured page data through
-    # the LLM analyzer so the final score uses the extracted forms/text/links too.
-    google_result = await check_google_safe_browsing(url_to_check)
-    openphish_result = await check_openphish(url_to_check)
-    spamhaus_result = await check_spamhaus(url_to_check)
-    domain_details_result = await get_domain_details(url_to_check)
+    # Run all reputation and infrastructure checks concurrently
+    reputation_task = run_all_reputation_checks(url_to_check)
+    infra_task = run_infra_checks(url_to_check, url_data)
+    reputation_results, infra_results = await asyncio.gather(reputation_task, infra_task)
 
-    all_results = [google_result, openphish_result, spamhaus_result, domain_details_result]
+    all_checks = reputation_results.get("checks", []) + infra_results.get("checks", [])
+
+    # Find the Google Safe Browsing result for the LLM and logging
+    google_result = next(
+        (check for check in all_checks if check.get("source") == "Google Safe Browsing"),
+        {
+            "score": 0.5, "risk_score": 50, "threat_type": "UNKNOWN", "verdict": "UNKNOWN",
+            "source": "Google Safe Browsing", "details": "Check did not run or failed."
+        }
+    )
+
+    # 2. Show the response from Google Safe Search API
+    print(f"[DEBUG] Google Safe Browsing response for {domain_to_check}: {google_result}")
+
     llm_scan_report = {
         **url_data,
-        "reputation_checks": all_results,
+        "reputation_checks": all_checks,
     }
-    final_analysis = analyze_scan_report(llm_scan_report, google_result, use_gemini=True)
-    final_analysis["reputation_checks"] = all_results
+
+    analysis_bundle = analyze_scan_report(llm_scan_report, google_result, use_gemini=True)
+    final_analysis = analysis_bundle["analysis"]
+    raw_gemini_response = analysis_bundle.get("raw_gemini_response")
+
+    # 3. Print the report of analysis from Gemini
+    if raw_gemini_response:
+        print(f"[DEBUG] Gemini analysis report for {domain_to_check}:")
+        print(json.dumps(raw_gemini_response, indent=2))
+
+    # 4. Create a separate text file and save the results
+    analysis_log_entry = {
+        "url": url_to_check,
+        "domain": domain_to_check,
+        "all_scan_results": all_checks,
+        "google_safe_browsing_response": google_result,
+        "gemini_response": raw_gemini_response,
+        "final_analysis_summary": {
+            "risk_score": final_analysis.get("risk_score"),
+            "threat_type": final_analysis.get("threat_type"),
+            "brief_reason": final_analysis.get("brief_reason"),
+            "analysis_source": final_analysis.get("analysis_source"),
+        }
+    }
+    analysis_results_logger.info(json.dumps(analysis_log_entry, indent=2))
+
+    final_analysis["reputation_checks"] = all_checks
     final_analysis["report_type"] = url_data.get("reportType", "full_page_scan")
     final_analysis["scan_trigger"] = url_data.get("scanTrigger")
     final_analysis["page_url"] = url_data.get("sourcePageUrl") or url_to_check
@@ -316,7 +208,13 @@ async def check_url_only(request: UrlCheckRequest):
     Receives a single URL (e.g., from a mobile app), analyzes it,
     and returns the analysis result directly.
     """
-    analysis_result = await check_google_safe_browsing(request.url)
+    # For a quick check, we can just run the reputation checks
+    reputation_results = await run_all_reputation_checks(request.url)
+    
+    # For now, just return the raw checks. A more advanced version could run a
+    # lightweight scoring model here.
+    analysis_result = reputation_results
+
     return analysis_result
 
 @app.post("/api/manual_report")

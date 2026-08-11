@@ -4,31 +4,79 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Theft Alert</title>
-    <link rel="stylesheet" href="../Styles/popup_style.css">
+    <link rel="stylesheet" href="popup.css">
 </head>
 <body>
     <div class="container">
-        <div class="header">
-            <img src="../resources/icon48.png" alt="Logo" class="logo">
+        <header>
             <h1>Theft Alert</h1>
-        </div>
-        <div class="status-container">
-            <p>Backend Status: <span id="status-indicator" class="disconnected"></span> <span id="status-text">Disconnected</span></p>
-        </div>
-        <div class="content">
-            <p>Phishing & Fraud Detection by <strong>Team Paradox</strong>.</p>
-        </div>
-        <div class="actions">
-            <button id="report-btn">Report this site</button>
-        </div>
-        <div class="footer">
-            <button id="github-btn">
-                <span id="github-icon"></span>
-                View on GitHub
-            </button>
-        </div>
+            <div id="status-indicator" class="disconnected" title="Backend Connection Status"></div>
+        </header>
+
+        <main id="view-container">
+            <!-- Views will be injected here by popup.js -->
+        </main>
+
+        <footer>
+            <button id="home-btn" class="nav-btn active">Scan</button>
+            <button id="history-btn" class="nav-btn">History</button>
+        </footer>
     </div>
-    <script src="../dependencies/iconify.min.js"></script>
+
+    <!-- Templates for different views -->
+    <template id="loading-view-template">
+        <div class="view" id="loading-view">
+            <div class="spinner"></div>
+            <p>Analyzing page...</p>
+            <p class="url-display"></p>
+        </div>
+    </template>
+
+    <template id="home-view-template">
+        <div class="view" id="home-view">
+            <h2>Current Page</h2>
+            <p class="url-display">[No active tab]</p>
+            <button id="scan-current-page-btn" class="action-btn" disabled>Scan Current Page</button>
+        </div>
+    </template>
+
+    <template id="results-view-template">
+        <div class="view" id="results-view">
+            <div class="score-circle">
+                <span class="score-value">--</span>
+                <span class="score-label">Risk Score</span>
+            </div>
+            <h2 class="threat-type">UNKNOWN</h2>
+            <p class="url-display"></p>
+            <p class="brief-reason"></p>
+
+            <div class="actions">
+                <button id="rescan-btn" class="secondary-btn">Scan Again</button>
+                <button id="report-btn" class="secondary-btn danger">Report Phishing</button>
+            </div>
+
+            <details class="details-accordion">
+                <summary>View Full Analysis</summary>
+                <div class="details-content">
+                    <h3>Recommendation</h3>
+                    <p class="recommendation"></p>
+                    <h3>LLM Analysis (Gemini)</h3>
+                    <ul class="evidence-list"></ul>
+                    <p class="llm-description"></p>
+                    <h3>Threat Intelligence Breakdown</h3>
+                    <div class="reputation-checks"></div>
+                </div>
+            </details>
+        </div>
+    </template>
+
+    <template id="history-view-template">
+        <div class="view" id="history-view">
+            <h2>Scan History</h2>
+            <div id="history-list"><p>No scan history found.</p></div>
+        </div>
+    </template>
+
     <script src="popup.js"></script>
 </body>
 </html>

@@ -19,7 +19,7 @@ CREDENTIAL_FIELD_TERMS = [
     "password", "pass", "otp", "pin", "card", "cvv", "ssn", "token",
     "secret", "wallet", "bank", "login", "email", "user",
 ]
-DEFAULT_MODEL = "gemini-2.0-flash"
+DEFAULT_MODEL = "gemini-1.5-flash-latest"
 
 SYSTEM_PROMPT = """
 You are Theft Alert, a careful phishing and fraud detection analyst for a browser extension.
@@ -87,21 +87,32 @@ def analyze_scan_report(
         "description": "Google Safe Browsing result was not available.",
     }
 
+    raw_gemini_response = None
     if use_gemini and os.getenv("GEMINI_API_KEY"):
+        # This print statement confirms the key is found and Gemini is being attempted.
+        print("[DEBUG] GEMINI_API_KEY found. Attempting to call Gemini API...")
         try:
-            raw_result = _call_gemini(scan_report, safe_browsing_result)
-            return _normalize_result(raw_result, scan_report, safe_browsing_result, "gemini")
+            raw_gemini_response = _call_gemini(scan_report, safe_browsing_result)
+            final_analysis = _normalize_result(raw_gemini_response, scan_report, safe_browsing_result, "gemini")
+            return {"analysis": final_analysis, "raw_gemini_response": raw_gemini_response}
         except Exception as exc:
+            # DEBUG: Print the actual exception to the console to see why the API call failed.
+            print(f"[DEBUG] Gemini API call failed with an exception: {exc}")
             fallback = _heuristic_result(scan_report, safe_browsing_result, "heuristic_fallback")
             fallback["evidence"] = [f"Gemini unavailable: {_compact_text(str(exc), 140)}"] + fallback["evidence"]
             fallback["description"] = (
                 fallback["description"]
                 + " Gemini could not complete the LLM review, so this score uses local browser signals and Safe Browsing."
             )
-            return fallback
-
-    source = "heuristic_no_gemini_key" if use_gemini else "heuristic"
-    return _heuristic_result(scan_report, safe_browsing_result, source)
+            return {"analysis": fallback}
+    else:
+        # This block runs if Gemini is disabled or the API key is missing.
+        if use_gemini:  # This implies the API key is missing
+            print("[DEBUG] Gemini analysis skipped: GEMINI_API_KEY environment variable not found or is empty.")
+            print("[DEBUG] Please ensure a .env file with GEMINI_API_KEY='your_key' exists in the backend directory.")
+        source = "heuristic_no_gemini_key" if use_gemini else "heuristic"
+        final_analysis = _heuristic_result(scan_report, safe_browsing_result, source)
+        return {"analysis": final_analysis}
 
 
 def _call_gemini(scan_report: Dict[str, Any], safe_browsing_result: Dict[str, Any]) -> Dict[str, Any]:
@@ -208,15 +219,18 @@ def _build_scan_summary(scan_report: Dict[str, Any]) -> Dict[str, Any]:
     searchable = f"{url} {domain} {text}".lower()
     suspicious_terms = sorted({term for term in RISK_KEYWORDS if term in searchable})
     reputation_summary: List[Dict[str, Any]] = []
-    for result in reputation_checks[:8]:
+    for result in reputation_checks[:12]:
         if not isinstance(result, dict):
             continue
         reputation_summary.append(
             {
                 "source": _compact_text(result.get("source", "Unknown"), 80),
-                "score": result.get("score"),
-                "threat_type": result.get("threat_type"),
-                "details": _compact_text(result.get("details", ""), 220),
+                # Use risk_score (0-100) if available, fall back to score (0-1)
+                "score": result.get("risk_score", result.get("score")),
+                # Use verdict if available, fall back to threat_type
+                "threat_type": result.get("verdict", result.get("threat_type")),
+                # Use description if available, fall back to details
+                "details": _compact_text(result.get("description", result.get("details", "")), 220),
             }
         )
 
@@ -334,16 +348,28 @@ def _normalize_result(
     safe_hit = safe_type not in SAFE_BROWSING_NON_HITS
     risk_score = _coerce_score(raw_result.get("risk_score", raw_result.get("score")), default=50)
 
+    # The LLM is instructed to use Safe Browsing as a key signal.
+    # This override is a safety net in case the LLM provides a low score despite a confirmed threat.
     if safe_hit:
-        risk_score = max(risk_score, 90)
+        if source == "gemini":
+            # If Gemini rated it low (<75) despite a GSB hit, we treat it as a high-risk event.
+            # This respects Gemini's score if it's already high, but provides a safety floor.
+            if risk_score < 75:
+                risk_score = 95
+        else:
+            # For heuristics, a GSB hit is a definitive high-risk signal.
+            risk_score = max(risk_score, 90)
 
-    threat_type = str(raw_result.get("threat_type") or _risk_to_threat_type(risk_score, safe_type)).upper()
+    threat_type = str(raw_result.get("threat_type") or "UNKNOWN").upper()
     threat_type = re.sub(r"[^A-Z0-9_]+", "_", threat_type).strip("_") or "UNKNOWN"
+
+    # If there's a Safe Browsing hit, its verdict is the most reliable for categorization.
     if safe_hit:
         threat_type = _safe_browsing_threat_type(safe_type)
     elif risk_score < 25:
         threat_type = "SAFE"
     elif threat_type == "UNKNOWN":
+        # If LLM didn't specify a type, derive it from the score.
         threat_type = _risk_to_threat_type(risk_score, safe_type)
 
     evidence = _coerce_evidence(raw_result.get("evidence"))

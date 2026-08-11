@@ -29,6 +29,7 @@ console.log(`[DEBUG ANCHOR] service_worker.js | NEW INSTANCE STARTED | ID: ${WOR
 let ws = null;
 let isWsConnected = false;
 let reconnectionTimer = null;
+let activeScans = new Map(); // Track active scans by tabId
 const recentAnalysisByTab = new Map();
 
 /**
@@ -143,12 +144,30 @@ function renderBroadcastAnalysis(analysis) {
 }
 
 function renderAnalysisForTab(tabId, analysis) {
+    // Save the latest analysis for this tab to be retrieved by the popup later.
+    activeScans.delete(tabId); // Scan is complete for this tab
+    chrome.storage.local.set({ [`latest_analysis_${tabId}`]: analysis });
+
     const viewModel = buildAnalysisViewModel(analysis);
     if (!shouldDisplayAnalysis(tabId, viewModel)) {
         return;
     }
 
-    if (viewModel.threatType === 'SAFE' || viewModel.riskScore < 50) {
+    // Also send a direct message to the popup if it's open
+    (async () => {
+        const { scanHistory = [] } = await chrome.storage.local.get('scanHistory');
+        chrome.runtime.sendMessage({
+            type: 'ANALYSIS_COMPLETE',
+            analysis: analysis,
+            history: scanHistory
+        }, () => {
+            if (chrome.runtime.lastError) { /* Popup not open, ignore */ }
+        });
+    })();
+
+
+    // Show in-page alerts
+    if (viewModel.threatType === 'SAFE' || viewModel.riskScore < 40) {
         showSafeToast(tabId, viewModel);
     } else {
         showThreatAlert(tabId, viewModel);
@@ -162,6 +181,27 @@ function shouldDisplayAnalysis(tabId, viewModel) {
 
     recentAnalysisByTab.set(tabId, { key, time: now });
     return !(previous && previous.key === key && now - previous.time < RECENT_ANALYSIS_TTL_MS);
+}
+
+/**
+ * Saves the analysis to a rolling history in chrome.storage.
+ * @param {object} analysis - The full analysis object from the backend.
+ */
+async function updateScanHistory(analysis) {
+    if (!analysis || !analysis.domain) return;
+
+    const { scanHistory = [] } = await chrome.storage.local.get('scanHistory');
+
+    // Remove previous entry for the same domain to prevent duplicates
+    const filteredHistory = scanHistory.filter(item => item.domain !== analysis.domain);
+
+    // Add the new analysis to the front of the array
+    const newHistory = [analysis, ...filteredHistory];
+
+    // Keep only the 5 most recent unique domain scans
+    const trimmedHistory = newHistory.slice(0, 5);
+
+    await chrome.storage.local.set({ scanHistory: trimmedHistory });
 }
 
 function buildAnalysisViewModel(analysis) {
@@ -234,6 +274,40 @@ function fallbackRecommendation(threatType) {
  * @param {number} tabId - The ID of the tab to inject the alert into.
  * @param {object} viewModel - Normalized analysis data for display.
  */
+function showProcessingIndicator(tabId) {
+    chrome.scripting.insertCSS({
+        target: { tabId: tabId },
+        files: ["Styles/toast_style.css"] // Reuse toast styles for positioning
+    });
+
+    chrome.scripting.executeScript({
+        target: { tabId: tabId },
+        func: () => {
+            // Remove any existing UI from this extension first
+            document.getElementById('theft-alert-toast')?.remove();
+            document.getElementById('theft-alert-overlay')?.remove();
+            document.getElementById('theft-alert-processing-indicator')?.remove();
+
+            const indicator = document.createElement('div');
+            indicator.id = 'theft-alert-processing-indicator';
+            indicator.className = 'theft-alert-toast'; 
+            indicator.setAttribute('role', 'status');
+            indicator.style.padding = '16px';
+            indicator.innerHTML = `
+                <div style="display: flex; align-items: center; justify-content: center; gap: 10px;">
+                    <strong style="font-size: 16px;">Theft Alert: Analyzing page...</strong>
+                </div>
+            `;
+
+            document.body.appendChild(indicator);
+
+            setTimeout(() => {
+                indicator.classList.add('show');
+            }, 100);
+        }
+    });
+}
+
 function showThreatAlert(tabId, viewModel) {
     chrome.scripting.insertCSS({
         target: { tabId: tabId },
@@ -244,9 +318,10 @@ function showThreatAlert(tabId, viewModel) {
         target: { tabId: tabId },
         func: (model) => {
             // DEBUG: Log the full analysis result to the page's console.
-            console.log('[DEBUG] Backend Analysis Result (Threat):', analysisResult);
+            console.log('[DEBUG] Backend Analysis Result (Threat):', model);
 
             document.getElementById('theft-alert-overlay')?.remove();
+            document.getElementById('theft-alert-processing-indicator')?.remove();
 
             const overlay = document.createElement('div');
             overlay.id = 'theft-alert-overlay';
@@ -305,6 +380,7 @@ function showSafeToast(tabId, viewModel) {
         target: { tabId: tabId },
         func: (model) => {
             document.getElementById('theft-alert-toast')?.remove();
+            document.getElementById('theft-alert-processing-indicator')?.remove();
 
             const toast = document.createElement('div');
             toast.id = 'theft-alert-toast';
@@ -363,11 +439,27 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         console.log(`[DEBUG] service_worker.js | ID: ${WORKER_INSTANCE_ID} | I am the active worker. Processing message.`);
         if (message.type === "PAGE_DATA") {
             console.log(`Received page data from tab: ${sender.tab.id}, frameId: ${frameId}`);
+                activeScans.set(sender.tab.id, true); // Mark scan as active for this tab
             const reportData = { ...message.data, reportType: 'full_page_scan' };
+
+            // Show processing indicator immediately for top-frame scans
+            if (reportData.isTopFrame && sender.tab?.id) {
+                showProcessingIndicator(sender.tab.id);
+
+                // Also notify the popup immediately that a scan has started
+                chrome.runtime.sendMessage({
+                    type: 'SCAN_STARTED',
+                    tabId: sender.tab.id,
+                    url: reportData.url
+                }, () => { if (chrome.runtime.lastError) { /* Popup not open, ignore */ } });
+            }
+
             const result = await sendDataToBackend(reportData, BACKEND_API_URL);
 
-            if (result?.analysis && reportData.isTopFrame && sender.tab?.id) {
-                renderAnalysisForTab(sender.tab.id, result.analysis);
+            if (result?.analysis && sender.tab?.id) {
+                const fullAnalysis = result.analysis;
+                await updateScanHistory(fullAnalysis);
+                renderAnalysisForTab(sender.tab.id, fullAnalysis);
             }
         } else if (message.type === "NETWORK_REQUEST") {
             console.log("Received network request from tab:", sender.tab.id, message.data.url);
@@ -384,6 +476,27 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         } else if (message.type === 'GET_WS_STATUS') {
             sendResponse({ isConnected: isWsConnected });
             broadcastWsStatus();
+        } else if (message.type === 'GET_POPUP_DATA') {
+            (async () => {
+                const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+                if (!tab || !tab.id) {
+                    sendResponse({ tab: null, analysis: null, history: [], isConnected: isWsConnected });
+                    return;
+                }
+                const { [`latest_analysis_${tab.id}`]: analysis } = await chrome.storage.local.get(`latest_analysis_${tab.id}`);
+                const { scanHistory = [] } = await chrome.storage.local.get('scanHistory');
+                sendResponse({ tab, analysis: analysis || null, history: scanHistory, isConnected: isWsConnected });
+            })();
+            return true; // Keep message channel open for async response
+        } else if (message.type === 'TRIGGER_MANUAL_SCAN') {
+            if (message.tabId) {
+                // Ask the content script in the target tab to collect and send its data.
+                // Explicitly target frameId: 0 to ensure we message the main document, not an iframe.
+                chrome.tabs.sendMessage(message.tabId, { type: "REQUEST_PAGE_DATA", trigger: "manual_popup" }, { frameId: 0 })
+                    .catch(error => {
+                        console.error(`Could not send 'REQUEST_PAGE_DATA' to tab ${message.tabId}. The content script might not be active or injected on this page. Error: ${error.message}`);
+                    });
+            }
         }
     })();
 
