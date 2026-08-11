@@ -23,6 +23,37 @@ Modern web threats are increasingly sophisticated, often bypassing traditional b
 ---
 
 ## 2. System Architecture
+### Payload 
+```json
+{
+  "scanTrigger": "initial_load",
+  "domain": "dummy-ecommerce-site.com",
+  "url": "https://dummy-ecommerce-site.com/home",
+  "title": "Dummy Storefront",
+  "isTopFrame": true,
+  "favicon": "https://dummy-ecommerce-site.com/favicon.ico",
+  "cleanText": "Welcome to our store... [Mocked Page Text] ... Buy now!",
+  "links": [
+    "https://dummy-ecommerce-site.com/cart",
+    "https://dummy-ecommerce-site.com/product/001"
+  ],
+  "resources": {
+    "images": [
+      "https://dummy-ecommerce-site.com/assets/hero-image.jpg",
+      "https://dummy-ecommerce-site.com/assets/logo.png"
+    ],
+    "scripts": [
+      "https://dummy-ecommerce-site.com/js/main-bundle.js"
+    ],
+    "styles": [
+      "https://dummy-ecommerce-site.com/css/styles.css"
+    ]
+  },
+  "forms": [],
+  "iframes": [],
+  "reportType": "full_page_scan"
+}
+```
 
 ### 2.1. High-Level Architecture Diagram (Conceptual)
 
@@ -42,6 +73,55 @@ flowchart LR
     Engine -- "(6) WebSocket<br>Broadcast" --> Client
 ```
 
+```mermaid
+flowchart TD
+    %% Client Side Grouping
+    subgraph UserSide [User Side Clients]
+        Ext["Browser Extension<br>(Sends Full Data Packet: URL, DOM, Scripts, etc.)"]
+        App["Mobile/Web App<br>(Sends URL Only)"]
+    end
+
+    %% Backend Grouping
+    subgraph Backend [Backend Analysis Engine]
+        Router{"Request Source?"}
+        
+        %% App Specific Flow
+        AppRep["URL Reputation Check<br>(Internal DB + Threat APIs)"]
+        
+        %% Extension Specific Flow
+        L1["Layer 1: URL Reputation<br>(Query Threat Databases)"]
+        L2["Interaction Layer<br>(Verify DOM, Links, Scripts, WHOIS, Reg. Timestamps)"]
+        L3["Content Layer<br>(LLM Text Analysis)"]
+        Scoring["Scoring System<br>(Compile Evidence, Details, & Final Score)"]
+        DB[("Internal Database<br>(Save Threat Records)")]
+    end
+
+    %% External APIs Grouping
+    subgraph External [External APIs & Feeds]
+        Feeds["Threat Intelligence APIs<br>(Google, VirusTotal, Spamhaus, URLScan,<br>URLhaus, Pulsedive, AbuseIPDB, OTX)"]
+        LLM["LLM Service API<br>(Google Gemini)"]
+    end
+
+    %% Routing
+    Ext -- "Step 1: Full Payload" --> Router
+    App -- "Step 2: URL Only" --> Router
+
+    %% App Workflow
+    Router -- "If App Request" --> AppRep
+    AppRep <--> Feeds
+    AppRep <--> DB
+    AppRep -- "Step 6: Return Simple Verdict" --> App
+
+    %% Extension Workflow
+    Router -- "If Extension Request" --> L1
+    L1 <--> Feeds
+    L1 -- "Step 3" --> L2
+    L2 -- "Step 4" --> L3
+    L3 <--> LLM
+    L3 -- "Step 5" --> Scoring
+    Scoring --> DB
+    Scoring -- "Step 6: Return Detailed Report" --> Ext
+```
 
 ### 2.2. Component Breakdown
 
