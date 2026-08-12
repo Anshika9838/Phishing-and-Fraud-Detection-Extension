@@ -1,480 +1,226 @@
-# Project Documentation: Theft Alert - Advanced Phishing & Fraud Detection System
+# Theft Alert
 
-**Version:** 1.0.0
-**Last Updated:** 2026-08-12
+Theft Alert is a Chromium browser extension that detects phishing and fraud risk on websites. It inspects a page's URL, visible text, links, forms, embedded frames, resources, and selected network activity. The result is shown as either a temporary safety notification or a threat alert with a risk score, explanation, evidence, and recommendation.
 
-## 1. Executive Summary
+The extension also lets a user manually report the current website. Reports are sent to the local FastAPI backend for logging and future review.
 
-### 1.1. Project Mission
+## How detection works
 
-Theft Alert is a server-side, real-time security analysis engine designed to protect end-users from web-based threats such as phishing, fraud, malware distribution, and credential theft. It serves as the intelligent backend for a client-side application (e.g., a browser extension), providing rapid and accurate risk assessments of visited URLs.
-
-### 1.2. Core Problem Solved
-
-Modern web threats are increasingly sophisticated, often bypassing traditional blocklist-based security. Phishers use newly registered domains, valid SSL certificates, and clever social engineering to appear legitimate. Theft Alert addresses this by moving beyond simple reputation checks to perform a holistic, multi-layered analysis that incorporates infrastructure forensics, heuristic pattern matching, and AI-powered contextual understanding.
-
-### 1.3. Key Differentiators
-
-*   **Multi-Layered Analysis:** Aggregates signals from dozens of sources across three distinct layers: external threat intelligence, infrastructure analysis, and content heuristics.
-*   **AI-Powered Judgment:** Utilizes a Large Language Model (Google Gemini) to act as a virtual security analyst, identifying nuanced and novel threats that automated checks might miss.
-*   **Real-Time Prevention:** Delivers verdicts to the client via WebSockets, enabling immediate user notification and preventing interaction with malicious sites before compromise.
-*   **Comprehensive Data Model:** Collects a rich set of telemetry from the client, including page text, form structures, and resource links, to fuel its analysis.
-
----
-
-## 2. System Architecture
-### Payload 
-```json
-{
-  "scanTrigger": "initial_load",
-  "domain": "dummy-ecommerce-site.com",
-  "url": "https://dummy-ecommerce-site.com/home",
-  "title": "Dummy Storefront",
-  "isTopFrame": true,
-  "favicon": "https://dummy-ecommerce-site.com/favicon.ico",
-  "cleanText": "Welcome to our store... [Mocked Page Text] ... Buy now!",
-  "links": [
-    "https://dummy-ecommerce-site.com/cart",
-    "https://dummy-ecommerce-site.com/product/001"
-  ],
-  "resources": {
-    "images": [
-      "https://dummy-ecommerce-site.com/assets/hero-image.jpg",
-      "https://dummy-ecommerce-site.com/assets/logo.png"
-    ],
-    "scripts": [
-      "https://dummy-ecommerce-site.com/js/main-bundle.js"
-    ],
-    "styles": [
-      "https://dummy-ecommerce-site.com/css/styles.css"
-    ]
-  },
-  "forms": [],
-  "iframes": [],
-  "reportType": "full_page_scan"
-}
+```text
+Website
+  -> universal_script.js collects a privacy-preserving page snapshot
+  -> service_worker.js sends the snapshot to FastAPI
+  -> Google Safe Browsing checks the URL
+  -> OpenPhish, Spamhaus, WHOIS, and SSL Labs add reputation evidence
+  -> llm_analyzer.py sends the evidence and page signals to the embedded LLM analyzer
+  -> heuristic analysis is used when the LLM analyzer is unavailable
+  -> result is returned and broadcast over WebSocket
+  -> the extension displays a safety toast or threat alert
 ```
 
-### 2.1. High-Level Architecture Diagram (Conceptual)
+Google Safe Browsing is checked first as a high-value reputation signal. The final analysis also considers credential fields, external form actions, suspicious language, HTTP URLs, punycode, deep subdomains, external links, iframes, and cross-domain fetch/XHR requests.
 
-```mermaid 
-flowchart LR
-    Client["Client<br>(Browser Ext.)"]
-    FastAPI["FastAPI Server<br>(main.py)"]
-    ThreatFeeds["External Threat Feeds<br>(Google, VirusTotal, etc)"]
-    Engine["Analysis Engine<br>(threat_feeds, infra_analyzer, scoring)"]
-    LLM["Google Gemini LLM<br>(llm_analyzer.py)"]
+### Scanned-data flow
 
-    Client -- "(1) HTTP POST<br>/api/report (URL, Page Metadata)" --> FastAPI
-    FastAPI -- "(3) API Calls" --> ThreatFeeds
-    FastAPI -- "(2) Orchestrates<br>Parallel Analysis" --> Engine
-    Engine -- "(4) LLM API Call" --> LLM
-    LLM -- "(5) JSON Verdict" --> Engine
-    Engine -- "(6) WebSocket<br>Broadcast" --> Client
+1. `universal_script.js` runs on the current website and creates a page report. It sends the page URL and domain, title, a truncated sample of visible text, links, resource URLs, forms and field metadata, iframe URLs, and the scan trigger. It does not send form values or passwords.
+2. The same content script observes `fetch` and `XMLHttpRequest` destinations. A network-activity report contains the destination URL, HTTP method, request type, source page URL, and source page domain. This helps identify cross-domain requests made by the page.
+3. `service_worker.js` posts each report to `POST /api/report`. The backend logs the received payload and checks the reported URL with Google Safe Browsing, OpenPhish, Spamhaus, WHOIS, and cached Qualys SSL Labs data.
+4. The backend adds those reputation results to the original browser report as `reputation_checks` and passes the combined evidence to `llm_analyzer.py`.
+5. The embedded LLM analyzer receives a compact, structured summary containing the reputation results, visible-text sample, suspicious terms, URL signals, counts of forms/links/iframes/resources, form summaries, and network-activity details. It returns a JSON risk score, threat category, reason, description, recommendation, and evidence.
+6. If the LLM analyzer is not configured or its request fails, the backend uses the deterministic heuristic fallback described below. The result is normalized, broadcast over WebSocket, and rendered by the extension as a toast or threat alert.
+
+### What generates the safe or risk score?
+
+The score is a **risk score from 0 to 100**, not a probability. A lower score means the captured evidence looks safer; a higher score means more phishing, fraud, malware, or credential-theft indicators were found. The extension displays scores below 50 as a safety toast and scores of 50 or higher as a threat alert.
+
+With the embedded LLM analyzer enabled, the model makes the final evidence-based judgment from these inputs:
+
+- Google Safe Browsing verdict and threat type.
+- OpenPhish listing status and Spamhaus blocklist status.
+- WHOIS registration information and the cached SSL Labs result.
+- URL structure: HTTP instead of HTTPS, punycode, and unusually deep subdomains.
+- Page behavior: password or credential-like fields, forms posting to another domain, external links, external iframes, and cross-domain fetch/XHR requests.
+- Page language: terms associated with urgency, account verification, payment, banking, OTPs, refunds, prizes, wallets, or identity information.
+
+The model is instructed to be conservative and return strict JSON. Its score is clamped to the 0-100 range during normalization. A confirmed Google Safe Browsing hit is a hard safety override: the score is raised to at least 90 and the threat type is mapped to `PHISHING` for social engineering or `MALWARE` for malware, unwanted software, and potentially harmful applications.
+
+When the LLM analyzer is unavailable, the local heuristic starts at **10/100** and adds these points:
+
+| Signal | Risk added |
+| --- | ---: |
+| Confirmed Google Safe Browsing hit | minimum score of 90 |
+| Safe Browsing unavailable or API key missing | score raised to at least 35 |
+| HTTP page | +10 |
+| Punycode domain | +18 |
+| Three or more levels of subdomains | +8 |
+| Password input | +20 |
+| Form submits to another domain | +25 |
+| Credential-like field | +12 |
+| Each suspicious term in the URL, domain, or text | +5, capped at +20 |
+| Five or more external link hosts | +8 |
+| External iframe | +10 |
+| Cross-domain network request | +12 |
+
+The heuristic total is clamped to 100. Without a confirmed Safe Browsing hit, the fallback maps `0-24` to `SAFE`, `25-49` to `LOW_RISK`, `50-74` to `SUSPICIOUS`, and `75-100` to `PHISHING`. These labels are advisory: a low score means no strong indicators were found in the captured data, not that the site has been proven safe.
+
+## Repository layout
+
+```text
+backend/
+  main.py             FastAPI routes, reputation checks, logging, WebSocket server
+  llm_analyzer.py     Embedded LLM integration, result normalization, heuristic fallback
+  requirements.txt    Python dependencies
+  env.example         Local environment variable template
+
+Chromium Extension/
+  manifest.json          Manifest V3 configuration and permissions
+  Scripts/
+    universal_script.js  Page inspection and DOM/network monitoring
+    service_worker.js    Backend communication and in-page result rendering
+    dev-tools.js         Development tooling
+  frontend/
+    popup.html/js         Popup UI and manual reporting
+    threat_alert.html     Detailed high-risk result markup
+  Styles/                 Popup, toast, alert, and injected page styles
+  dependencies/           Bundled Iconify, Anime.js, and Supabase libraries
+  resources/              Extension icons
 ```
 
-```mermaid
-flowchart TD
-    %% Client Side Grouping
-    subgraph UserSide [User Side Clients]
-        Ext["Browser Extension<br>(Sends Full Data Packet: URL, DOM, Scripts, etc.)"]
-        App["Mobile/Web App<br>(Sends URL Only)"]
-    end
+## Requirements
 
-    %% Backend Grouping
-    subgraph Backend [Backend Analysis Engine]
-        Router{"Request Source?"}
-        
-        %% App Specific Flow
-        AppRep["URL Reputation Check<br>(Internal DB + Threat APIs)"]
-        
-        %% Extension Specific Flow
-        L1["Layer 1: URL Reputation<br>(Query Threat Databases)"]
-        L2["Interaction Layer<br>(Verify DOM, Links, Scripts, WHOIS, Reg. Timestamps)"]
-        L3["Content Layer<br>(LLM Text Analysis)"]
-        Scoring["Scoring System<br>(Compile Evidence, Details, & Final Score)"]
-        DB[("Internal Database<br>(Save Threat Records)")]
-    end
+- Windows, macOS, or Linux
+- Python 3.10 or newer
+- A Chromium-based browser with support for unpacked Manifest V3 extensions
+- A Google Safe Browsing API key for URL reputation checks
+- An LLM provider API key in `GEMINI_API_KEY` for generated explanations (optional; the local heuristic fallback still works)
 
-    %% External APIs Grouping
-    subgraph External [External APIs & Feeds]
-        Feeds["Threat Intelligence APIs<br>(Google, VirusTotal, Spamhaus, URLScan,<br>URLhaus, Pulsedive, AbuseIPDB, OTX)"]
-        LLM["LLM Service API<br>(Google Gemini)"]
-    end
+## Backend setup
 
-    %% Routing
-    Ext -- "Step 1: Full Payload" --> Router
-    App -- "Step 2: URL Only" --> Router
+From the repository root, create and activate a virtual environment:
 
-    %% App Workflow
-    Router -- "If App Request" --> AppRep
-    AppRep <--> Feeds
-    AppRep <--> DB
-    AppRep -- "Step 6: Return Simple Verdict" --> App
-
-    %% Extension Workflow
-    Router -- "If Extension Request" --> L1
-    L1 <--> Feeds
-    L1 -- "Step 3" --> L2
-    L2 -- "Step 4" --> L3
-    L3 <--> LLM
-    L3 -- "Step 5" --> Scoring
-    Scoring --> DB
-    Scoring -- "Step 6: Return Detailed Report" --> Ext
+```powershell
+cd backend
+python -m venv venv
+.\venv\Scripts\Activate.ps1
+python -m pip install --upgrade pip
+pip install -r requirements.txt
 ```
 
-### 2.2. Component Breakdown
+Create `backend/.env` from `backend/env.example`:
 
-*   **Client (Browser Extension):** The data originator. It captures the URL, page content, and other metadata upon navigation and sends it to the backend. It also maintains a WebSocket connection to receive real-time results.
-*   **Backend Server (FastAPI):** The central orchestrator, written in Python. It exposes the API, manages WebSocket connections, and executes the analysis pipeline.
-*   **Analysis Engine:** A collection of Python modules responsible for the core logic:
-    *   `threat_feeds.py`: Queries external threat intelligence APIs.
-    *   `infra_analyzer.py`: Performs forensic checks on the site's infrastructure (WHOIS, SSL).
-    *   `llm_analyzer.py`: Prepares data for and queries the LLM, and includes a heuristic fallback.
-    *   `scoring.py`: Aggregates all results into a final, weighted score.
-*   **External Services:** Third-party APIs that provide threat intelligence data. These are crucial for the reputation analysis layer.
-*   **Large Language Model (LLM):** Google Gemini is used for the final layer of contextual analysis, providing a human-like judgment on the collected evidence.
-
-### 2.3. Technology Stack
-
-*   **Backend Framework:** FastAPI
-*   **Web Server:** Uvicorn (ASGI)
-*   **Language:** Python 3.9+
-*   **Real-time Communication:** WebSockets
-*   **HTTP Client:** `httpx` (for asynchronous API calls)
-*   **Core Libraries:** `pydantic`, `python-whois`, `dnspython`
-*   **Configuration:** `python-dotenv`
-
----
-
-## 3. Detailed Workflow: The Request Lifecycle
-
-1.  **Client-Side Ingestion:** A user navigates to a URL. The browser extension collects a JSON payload containing `url`, `domain`, `title`, `cleanText`, `forms`, `links`, `iframes`, and other metadata.
-
-2.  **API Request:** The extension sends an HTTP `POST` request with the JSON payload to the `/api/report` endpoint on the FastAPI server.
-
-3.  **Backend Orchestration (`main.py`):**
-    *   The `report_url` function receives the request.
-    *   The full payload is logged to `scan_reports.log` for auditing and future training.
-    *   It initiates two primary analysis tasks concurrently using `asyncio.gather`.
-
-4.  **Parallel Analysis Execution:**
-    *   **Task A: Reputation Checks (`run_all_reputation_checks` in `threat_feeds.py`):**
-        *   An `httpx.AsyncClient` is created.
-        *   A list of coroutines, one for each threat feed (e.g., `check_google_safe_browsing`, `check_virustotal`), is created.
-        *   `asyncio.gather` executes all these API calls in parallel, significantly reducing I/O wait time.
-    *   **Task B: Infrastructure Checks (`run_infra_checks` in `infra_analyzer.py`):**
-        *   Runs `get_ssl_details`, `get_whois_detailed`, and other infrastructure checks concurrently.
-        *   Simultaneously runs `heuristic_url_analysis` on the URL and page content.
-
-5.  **Data Aggregation for LLM (`main.py` -> `llm_analyzer.py`):**
-    *   The results from both tasks are collected.
-    *   A new, comprehensive `llm_scan_report` dictionary is created, combining the original client payload with the results of all reputation and infrastructure checks.
-    *   The `analyze_scan_report` function is called.
-
-6.  **AI-Powered Judgment (`llm_analyzer.py`):**
-    *   If a `GEMINI_API_KEY` is present, the `_build_scan_summary` function transforms the massive `llm_scan_report` into a condensed, token-efficient summary.
-    *   This summary is embedded in a prompt that instructs the Gemini model to act as a security analyst and return a structured JSON object matching `RESPONSE_SCHEMA`.
-    *   An API call is made to the Gemini API.
-    *   **Fallback:** If the Gemini API call fails or the key is missing, the system falls back to the `_heuristic_result` function, which calculates a risk score based on a simpler set of rules.
-
-7.  **Final Analysis & Normalization (`llm_analyzer.py`):**
-    *   The `_normalize_result` function takes the raw output from either Gemini or the heuristic fallback.
-    *   It cleans, validates, and standardizes the result, ensuring a consistent output format.
-    *   Crucially, it implements a **safety override**: if Google Safe Browsing reported a confirmed threat, the final `risk_score` is floored at a high value (e.g., 95), even if the LLM provided a lower score.
-
-8.  **Real-time Broadcast (`main.py`):**
-    *   The final, normalized analysis JSON is serialized into a string.
-    *   The `manager.broadcast` function sends this string over the active WebSocket connection to all connected clients.
-    *   The browser extension receives the message, parses it, and displays the appropriate UI (e.g., a warning banner).
-
-9.  **Final Logging (`main.py`):**
-    *   A detailed summary of the entire analysis, including the raw check results, the Gemini response, and the final verdict, is logged to `analysis_results.log`. This file is the primary source for debugging and future ML model training.
-
----
-
-## 4. Feature Deep Dive
-
-### 4.1. Layer 1: Reputation Analysis (`threat_feeds.py`)
-
-This module aggregates data from multiple industry-standard threat intelligence feeds. Each check is an `async` function that returns a standardized dictionary.
-
-| Source                      | Check Target(s) | Key Function                  | Notes                                                              |
-| --------------------------- | --------------- | ----------------------------- | ------------------------------------------------------------------ |
-| **Google Safe Browsing**    | URL             | `check_google_safe_browsing`  | Core check for known phishing/malware. High weight (10).           |
-| **VirusTotal**              | URL             | `check_virustotal`            | Aggregator of 90+ scanners. High weight (9). Handles unscanned URLs. |
-| **URLhaus (abuse.ch)**      | URL             | `check_urlhaus`               | Specializes in malware distribution URLs. High weight (9).         |
-| **OpenPhish**               | URL, Domain     | `check_openphish`             | Free, community-driven phishing feed. Medium weight (7).           |
-| **AbuseIPDB**               | IP Address      | `check_abuseipdb`             | Checks IP reputation based on abuse reports. Medium weight (7).    |
-| **AlienVault OTX**          | Domain, IP      | `check_otx`                   | Community threat pulses. Medium weight (6).                        |
-| **Spamhaus**                | Domain, IP      | `check_spamhaus`              | DNSBL check against spam/phishing lists. Medium weight (6).        |
-| **Pulsedive**               | URL, Domain, IP | `check_pulsedive`             | Threat enrichment platform. Lower weight (5).                      |
-| **URLScan.io**              | URL, Domain     | `check_urlscan`               | Forensic analysis of page renders. Medium weight (7).              |
-| **crt.sh (CT Logs)**        | Domain          | `check_crtsh`                 | Certificate Transparency logs. Low weight (3), signals newness.    |
-
-### 4.2. Layer 2: Infrastructure & Heuristic Analysis (`infra_analyzer.py`)
-
-This module inspects the "physical" and structural properties of a website.
-
-*   **SSL/TLS Certificate Analysis (`get_ssl_details`):**
-    *   **Checks:** Expiration date, issuer, self-signed status, and subject/hostname match.
-    *   **Red Flags:** Expired, self-signed, or expiring-soon certificates are assigned a high risk score. A mismatch between the certificate's Common Name (CN) and the domain is also a strong suspicious signal.
-
-*   **WHOIS / Domain Registration Analysis (`get_whois_detailed`):**
-    *   **Checks:** Domain creation date, expiration date, registrar, and use of privacy services.
-    *   **Red Flags:** Extremely new domains (e.g., < 30 days old) are a primary indicator of phishing and receive a very high risk score. Short registration periods (e.g., 1 year) and the use of privacy protection on a new domain also increase risk.
-
-*   **Heuristic & Content Analysis (`heuristic_url_analysis`):**
-    *   **URL Structure:** Looks for `@` symbols, IP addresses in the hostname, punycode (`xn--`), excessive hyphens, and suspicious TLDs (`.xyz`, `.tk`).
-    *   **Brand Impersonation:** Detects if a brand keyword (e.g., "paypal") is in the URL but the domain is not an official one.
-    *   **Content (from client payload):**
-        *   **Forms:** Detects password fields and forms that submit data to an external domain.
-        *   **Text:** Scans for social engineering "urgency" keywords ("verify," "suspended," "action required").
-        *   **Title/Domain Mismatch:** Checks if the page title mentions a brand that is not in the domain name (e.g., title "Microsoft Login" on domain `secure-support-123.com`).
-
-### 4.3. Layer 3: AI Contextual Analysis (`llm_analyzer.py`)
-
-This is the system's most advanced layer, providing nuanced judgment.
-
-*   **Role of the LLM:** The Gemini model is prompted to act as a "careful phishing and fraud detection analyst." It is not just a text summarizer; it is a decision-making component.
-*   **Input:** It receives a highly condensed but comprehensive summary of all data collected in the previous layers, including client-side text, form details, and all reputation/infra check results.
-*   **Prompt Engineering:**
-    *   **`SYSTEM_PROMPT`:** Sets the persona and core instructions (be concise, evidence-led, conservative, return JSON).
-    *   **`RESPONSE_SCHEMA`:** Enforces a strict JSON output format, making the response machine-readable and predictable.
-*   **Decision Logic:** The LLM excels at connecting disparate, weak signals. For example, it can reason that a `(new domain)` + `(Let's Encrypt SSL)` + `(password form)` + `(text containing "verify your account")` is a classic phishing pattern, even if no single signal is definitive.
-*   **Heuristic Fallback (`_heuristic_result`):** Provides resilience. If the LLM is unavailable, a rule-based scoring system is used as a backup, ensuring the service never completely fails.
-
-### 4.4. Final Scoring Engine (`scoring.py`)
-
-This module is currently used for the `/api/scan_url` endpoint but its logic is a blueprint for a more advanced final aggregation step.
-
-*   **Weighted Average:** Calculates a baseline score by averaging the `risk_score` of all checks, weighted by their `weight` and `confidence`.
-*   **Critical Hit Boosting:** If a high-confidence "MALICIOUS" verdict comes from a critical source (Google, VT, URLhaus), the final score is automatically boosted to a minimum high-risk value (e.g., 85 or 95). This ensures that a single, strong negative signal is not diluted by many neutral or safe signals.
-*   **Threat Categorization:** Determines the final `threat_type` (e.g., `PHISHING`, `MALWARE`) based on the final score and the nature of the detected threats.
-
----
-
-## 5. Data Management & Privacy
-
-This section outlines the data handling policies that **must** be clearly communicated to end-users in a Privacy Policy.
-
-### 5.1. Data Collection Description
-
-When a scan is initiated by the client application, the following data is collected and transmitted to the Theft Alert backend:
-
-*   **URL & Domain Information:** The full URL and domain name of the page being analyzed.
-*   **Page Content & Metadata:** Page title, a sanitized text version of the page content, and metadata about the scan trigger (e.g., `on_page_load`).
-*   **Structural Page Data:** A structured representation of all forms (including input types), links, and iframes present on the page.
-*   **Public Internet Data:** During analysis, our server retrieves publicly available information related to the URL, including its IP address, WHOIS registration data, and SSL certificate details.
-
-**We do not collect or store any personally identifiable information (PII), user account details, cookies, or browsing history.**
-
-### 5.2. Data Usage Declaration
-
-*   **Primary Purpose:** All collected data is used **exclusively** for the purpose of security analysis to identify and protect you from malicious websites.
-*   **Service Improvement:** Anonymized and aggregated analysis results are stored in our server logs (`analysis_results.log`). This data is vital for:
-    *   Debugging and improving the accuracy of our detection algorithms.
-    *   Training future machine learning models to detect new threats more effectively.
-*   **No Commercial Use:** Your data is **never** sold, rented, or shared with third parties for advertising, marketing, or any other commercial purpose.
-
-### 5.3. Third-Party Data Sharing
-
-To perform the analysis, we share the **minimum necessary information** (typically the URL, domain, and/or IP address) with the following trusted third-party security services:
-
-*   Google Safe Browsing
-*   VirusTotal
-*   URLhaus (abuse.ch)
-*   OpenPhish
-*   AbuseIPDB
-*   AlienVault OTX
-*   Spamhaus
-*   Pulsedive
-*   URLScan.io
-*   crt.sh
-*   Google (for the Gemini LLM analysis)
-
-Our sharing of data with these providers is governed by their respective privacy policies.
-
----
-
-## 6. Technical Specifications
-
-### 6.1. Server Requirements
-
-*   **Runtime:** Python 3.9+
-*   **OS:** Linux (recommended)
-*   **Dependencies:** See `requirements.txt`. Key packages include `fastapi`, `uvicorn`, `httpx`, `python-whois`, `dnspython`, `python-dotenv`, `google-generativeai`.
-*   **Execution:** The server is launched using an ASGI server like Uvicorn:
-    ```bash
-    uvicorn main:app --host 0.0.0.0 --port 8000 --reload
-    ```
-
-### 6.2. Environment Configuration (`.env`)
-
-The server requires a `.env` file in the `/backend` directory to store API keys and other secrets. The `get_api_key` function in `threat_feeds.py` is flexible, but using these primary names is recommended:
-
-```ini
-# .env file
-
-# Core Services
-GEMINI_API_KEY="AIzaSy..."
-GOOGLE_API_KEY="AIzaSy..." # For Google Safe Browsing
-VIRUSTOTAL_API_KEY="..."
-
-# Secondary Threat Feeds
-URLSCAN_API_KEY="..."
-URLHAUS_API_KEY="..." # Auth-Key from abuse.ch
-OTX_API_KEY="..." # AlienVault OTX
-PULSEDIVE_API_KEY="..."
-ABUSEIPDB_API_KEY="..."
-SPAMHAUS_API_KEY="..." # Optional, for DQS
+```env
+GOOGLE_API_KEY=your_google_safe_browsing_key
+GEMINI_API_KEY=your_gemini_key
+GEMINI_MODEL=gemini-2.0-flash
 ```
 
-### 6.3. API Endpoint Specification
+Start the API from the `backend` directory:
 
-**Base URL:** `http://<server_ip>:8000`
-
----
-#### `GET /`
-*   **Description:** Health check endpoint.
-*   **Response (200 OK):**
-    ```json
-    {"status": "online", "service": "Theft Alert API"}
-    ```
-
----
-#### `POST /api/report`
-*   **Description:** The primary endpoint for the client extension. Receives a full page report, triggers the complete analysis pipeline (including LLM), and broadcasts the result via WebSocket.
-*   **Request Body:** A complex JSON object sent by the extension.
-    ```json
-    {
-      "url": "http://example-phishing.com/login",
-      "domain": "example-phishing.com",
-      "title": "Secure Login - My Bank",
-      "reportType": "full_page_scan",
-      "scanTrigger": "on_page_load",
-      "cleanText": "Welcome, please enter your username and password to continue...",
-      "forms": [{"action": "/submit", "inputs": [{"type": "password"}]}],
-      "links": ["http://external-site.com"],
-      "iframes": [],
-      "resources": {"scripts": ["/main.js"]}
-    }
-    ```
-*   **Response (200 OK):** A confirmation. The full analysis is sent via WebSocket.
-    ```json
-    {
-      "message": "Report received, logged, analyzed, and broadcasted.",
-      "domain": "example-phishing.com",
-      "analysis": { /* ... full analysis object ... */ }
-    }
-    ```
-
----
-#### `POST /api/scan_url`
-*   **Description:** A public-facing endpoint to scan a URL without requiring a client-side payload. Runs all reputation and infrastructure checks and returns a scored summary.
-*   **Request Body:**
-    ```json
-    {"url": "http://example-phishing.com"}
-    ```
-*   **Response (200 OK):** A detailed report including an overall verdict and a breakdown of all checks.
-    ```json
-    {
-        "url": "https://example-phishing.com",
-        "domain": "example-phishing.com",
-        "ip": "93.184.216.34",
-        "overall": {
-            "risk_score": 95.0,
-            "threat_type": "PHISHING",
-            "brief_reason": "...",
-            "recommendation": "⛔ DO NOT ENTER ANY CREDENTIALS..."
-        },
-        "reputation_checks": [/* ... */],
-        "infrastructure_checks": [/* ... */]
-    }
-    ```
-
----
-#### `POST /api/manual_report`
-*   **Description:** Allows a user to manually flag a URL as suspicious.
-*   **Request Body:**
-    ```json
-    {"url": "http://new-suspicious-site.com"}
-    ```
-*   **Response (200 OK):**
-    ```json
-    {"message": "Site reported successfully. Thank you for your contribution!"}
-    ```
-
----
-### 6.4. WebSocket Specification
-
-*   **Endpoint:** `ws://<server_ip>:8000/ws/{client_id}`
-*   **`client_id`:** A unique identifier generated by the client to distinguish its session.
-*   **Lifecycle:**
-    1.  The client connects to the endpoint upon initialization.
-    2.  The server accepts and adds the connection to its pool of `active_connections`.
-    3.  The client remains connected, listening for messages.
-    4.  When an analysis is complete for *any* client, the `/api/report` endpoint calls `manager.broadcast`, which sends the final JSON analysis result to **all** connected clients.
-    5.  The client-side logic should parse the incoming message and check if the `url` in the message matches the user's current tab URL before displaying a notification.
-    6.  The connection is terminated when the user closes their browser or on network error (`WebSocketDisconnect`).
-
-### 6.5. Logging Specification
-
-Three distinct log files are generated in the `/backend` directory for auditing and analysis:
-
-*   **`scan_reports.log`:**
-    *   **Content:** Raw, full JSON payloads as received from the client at the `/api/report` endpoint.
-    *   **Purpose:** Primary source for replaying events, debugging client-side data collection, and as a raw dataset for future feature engineering.
-
-*   **`manual_reports.log`:**
-    *   **Content:** A simple text log of URLs manually reported by users via `/api/manual_report`.
-    *   **Purpose:** Community-sourced threat intelligence. Can be periodically reviewed to identify threats missed by the automated system.
-
-*   **`analysis_results.log`:**
-    *   **Content:** A structured JSON log entry for every completed analysis. Contains the URL, the results of all individual checks, the raw Gemini response (if any), and the final normalized verdict.
-    *   **Purpose:** The most valuable log for data analysis. It represents a fully **labeled dataset** (features = check results, label = final verdict) that is perfect for training a custom, fine-tuned machine learning model.
-
----
-
-## 7. Client-Side Specification (Inferred for Browser Extension)
-
-### 7.1. Core Responsibilities
-
-1.  **Data Collection:** On page load (`tabs.onUpdated`), inject a content script to extract the page's text, form structure, links, etc.
-2.  **API Communication:**
-    *   Send the collected data as a JSON payload to the `POST /api/report` endpoint.
-    *   Establish and maintain a persistent WebSocket connection to `ws://<server_ip>:8000/ws/{client_id}`.
-3.  **UI Management:**
-    *   Listen for messages on the WebSocket.
-    *   When a message is received, check if its `url` or `domain` matches the current active tab.
-    *   If it matches, display a non-intrusive UI element (e.g., banner, icon change) corresponding to the `risk_score` and `threat_type`.
-4.  **User Interaction:**
-    *   Provide a browser action (popup) that allows the user to see details of the last scan.
-    *   Include a "Report Site" button in the popup that sends the current URL to the `POST /api/manual_report` endpoint.
-
-### 7.2. Required Permissions (Manifest V3 Example)
-
-```json
-{
-  "permissions": [
-    "storage",      // To store a persistent client_id and settings
-    "tabs",         // To get the URL of the current tab
-    "scripting"     // To inject content scripts to read page data
-  ],
-  "host_permissions": [
-    "http://<server_ip>:8000/*", // To allow fetch and WebSocket connections
-    "https://<server_ip>/*"
-  ]
-}
+```powershell
+python main.py
 ```
 
----
+The API listens on `http://localhost:8000`. Open that URL to verify that it returns an online status response.
 
-## 8. Future Enhancements & Development Roadmap
+## Load the extension
 
-*   **Custom ML Model Training:** Use the rich data in `analysis_results.log` to train a custom, lightweight classification model (e.g., Gradient Boosting, small neural network). This could potentially replace or augment the LLM for common cases, reducing latency and cost.
-*   **Caching Layer:** Implement a Redis or in-memory cache for scan results. If a popular URL is scanned multiple times within a short period, the cached result can be served instantly, reducing redundant API calls.
-*   **Admin Dashboard:** Create a simple web interface to view and search the `analysis_results.log` and `manual_reports.log` files, allowing for easier threat research and system monitoring.
-*   **Proactive Threat Broadcasts:** Enhance the WebSocket manager to allow for targeted or global broadcasts of newly discovered, high-impact threats, warning all connected users proactively.
-*   **Mobile Client Integration:** Develop a mobile application that uses the `/api/scan_url` endpoint to allow users to check links from SMS, email, or social media apps before opening them.
-*   **Enhanced Scoring Engine:** Fully integrate the logic from `scoring.py` into the main `/api/report` flow as a final aggregation step after the LLM analysis, creating a hybrid AI/heuristic final score.
+1. Open `chrome://extensions` or the equivalent extensions page in your Chromium browser.
+2. Enable **Developer mode**.
+3. Select **Load unpacked**.
+4. Choose the repository's `Chromium Extension` directory.
+5. Keep the FastAPI backend running before browsing to a page.
+
+The service worker connects to:
+
+- HTTP: `http://localhost:8000/api/report`
+- Manual reports: `http://localhost:8000/api/manual_report`
+- WebSocket: `ws://localhost:8000/ws/chrome-extension`
+
+These URLs are hard-coded in `Chromium Extension/Scripts/service_worker.js` and should be changed for a deployed backend.
+
+## User-facing behavior
+
+### Automatic scanning
+
+- An initial scan is sent after the page load event. Initial iframe scans are ignored to avoid duplicates.
+- A debounced scan is sent when relevant DOM changes occur, such as new links or changed form actions.
+- The content script observes page `fetch` and `XMLHttpRequest` calls and sends their URL, method, and request type as network activity.
+- Form values are not collected. Only field metadata such as type, name, ID, and placeholder is sent.
+- Visible page text is truncated to 1,500 characters before it is sent.
+
+### Results
+
+The analyzer returns:
+
+- `risk_score`: integer from 0 to 100, where 100 is the highest risk
+- `threat_type`: `SAFE`, `LOW_RISK`, `SUSPICIOUS`, `PHISHING`, `FRAUD`, `MALWARE`, or `UNKNOWN`
+- `brief_reason`: short explanation
+- `description`: fuller explanation of the observed signals
+- `recommendation`: suggested user action
+- `evidence`: up to five supporting observations
+
+Scores below 50 appear as a temporary safety toast. Scores of 50 or higher appear as a threat alert. A confirmed Google Safe Browsing hit forces the score to at least 90 and maps social-engineering results to `PHISHING`.
+
+### Manual reporting
+
+The popup's **Report this site** button sends the active tab URL to `/api/manual_report`. The browser stores a timestamp locally and disables reporting for that exact URL for 24 hours. The backend writes manual reports to `manual_reports.log`.
+
+## API endpoints
+
+| Method | Path | Purpose |
+| --- | --- | --- |
+| `GET` | `/` | Health/status response |
+| `POST` | `/api/report` | Analyze a page or network activity payload |
+| `POST` | `/api/check_url` | Run a standalone Google Safe Browsing URL check |
+| `POST` | `/api/manual_report` | Log a user-submitted URL report |
+| `WS` | `/ws/{client_id}` | Receive analysis broadcasts and acknowledge messages |
+
+The main page report payload includes `url`, `domain`, `title`, `cleanText`, `links`, `resources`, `forms`, `iframes`, `scanTrigger`, and `isTopFrame`. Network reports additionally include `sourcePageUrl`, `sourcePageDomain`, `method`, and `requestType`.
+
+## Analysis modes
+
+When `GEMINI_API_KEY` is configured, `llm_analyzer.py` calls the embedded LLM service with a strict JSON response schema. If the call fails, the analyzer returns a normalized heuristic result and explains that the fallback was used. Without an LLM provider key, the heuristic analyzer runs directly. The OpenPhish, Spamhaus, WHOIS, and SSL Labs results are provided as evidence to the LLM, but they are not independently added as fixed numeric weights in the fallback heuristic; Google Safe Browsing is the only reputation result that directly changes the fallback score.
+
+## Logs and privacy
+
+The backend writes:
+
+- `backend/scan_reports.log`: received scan payloads
+- `backend/manual_reports.log`: manually reported URLs
+
+Logs may contain URLs, page titles, visible text samples, link/resource URLs, form metadata, and network request destinations. Do not commit logs or API keys. The repository's `.gitignore` excludes `.env`, virtual environments, Python caches, and log files.
+
+No form values, passwords, or typed credentials are intentionally collected by the content script. URLs and page metadata can still be sensitive, so use a controlled backend and define an appropriate retention policy before deployment.
+
+## Security and deployment notes
+
+This repository is configured for local development:
+
+- CORS currently allows every origin (`*`). Restrict it to the deployed extension origin in production.
+- The backend uses HTTP and WebSocket connections to `localhost`. Use HTTPS/WSS behind a trusted reverse proxy when deployed.
+- API keys belong only in `backend/.env`; never place them in extension JavaScript.
+- `host_permissions` and the content script match all URLs because detection is intended to work across websites. Review this permission before publishing.
+- External reputation services can rate-limit requests and may have their own data-use terms.
+- A risk score is not a guarantee. Users should independently verify important domains and avoid entering sensitive information when the result is suspicious.
+
+## Troubleshooting
+
+### Popup says `Disconnected`
+
+Confirm that the backend is running on port 8000, then reload the extension from the browser's extensions page. Inspect the service worker console for connection errors.
+
+### No result appears on a page
+
+Reload the page after loading or reloading the extension. Check the page console for `universal_script.js` messages and the service worker console for failed requests. Browser-protected pages such as browser settings and extension stores may not allow content scripts.
+
+### Safe Browsing is skipped
+
+Set `GOOGLE_API_KEY` in `backend/.env`, restart the backend, and confirm that the Safe Browsing API is enabled for the Google Cloud project.
+
+### The LLM analyzer is unavailable
+
+Set `GEMINI_API_KEY` and restart the backend. The extension still receives a heuristic result if the LLM provider key is missing or its request fails.
+
+## License and project status
+
+No license file is currently included. Add a license before redistributing the project. This is an active development project and should be tested with representative benign and malicious test URLs in an isolated environment before wider deployment.
